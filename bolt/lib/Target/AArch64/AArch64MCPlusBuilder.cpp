@@ -732,8 +732,20 @@ public:
       return false;
     }
     MCInst *DefBaseAddr = UsesAdd[1];
-    assert(DefBaseAddr->getOpcode() == AArch64::ADR &&
-           "Failed to match indirect branch pattern! (fragment 3)");
+    if (DefBaseAddr->getOpcode() != AArch64::ADR) {
+      // In golang mode, downgrade to a graceful skip: Go runtime.memmove
+      // contains an indirect branch whose decoded pattern does not match
+      // (a data value that happens to decode like the pattern's first
+      // instruction). Treat the branch as UNKNOWN (no jump table).
+      // Non-golang builds keep the strict assert.
+      if (GolangMode) {
+        outs() << "BOLT-WARNING: skipping unknown indirect branch pattern\n";
+        return false;
+      }
+      assert(DefBaseAddr->getOpcode() == AArch64::ADR &&
+             "Failed to match indirect branch pattern! (fragment 3)");
+      return false;
+    }
 
     PCRelBase = DefBaseAddr;
     // Match LOAD to load the jump table (relative) target
