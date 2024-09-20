@@ -407,6 +407,14 @@ static uint64_t extractValueAArch64(uint32_t Type, uint64_t Contents,
     Contents &= ~0xffffffffffc003ffU;
     return Contents >> (10 - 3);
   }
+
+  case ELF::R_AARCH64_TLSLE_MOVW_TPREL_G0:
+  case ELF::R_AARCH64_TLSLE_MOVW_TPREL_G0_NC: {
+    // 16 bits Immediate goes in [20:5] bits
+    Contents &= ~0xffffffffffe0001fU;
+    return Contents >> 5;
+  }
+
   case ELF::R_AARCH64_TLSLE_ADD_TPREL_HI12:
   case ELF::R_AARCH64_TLSLE_ADD_TPREL_LO12_NC:
   case ELF::R_AARCH64_TLSDESC_ADD_LO12:
