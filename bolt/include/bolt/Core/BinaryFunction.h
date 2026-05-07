@@ -83,6 +83,10 @@ enum class HashFunction : char {
   Default = XXH3,
 };
 
+enum IndexOrder {
+  INVALID_BF_INDEX = -1U,
+};
+
 /// Information on a single indirect call to a particular callee.
 struct IndirectCallProfile {
   MCSymbol *Symbol;
@@ -219,6 +223,9 @@ public:
   using CFIInstrMapType = SmallVector<MCCFIInstruction, 0>;
   using cfi_iterator = CFIInstrMapType::iterator;
   using const_cfi_iterator = CFIInstrMapType::const_iterator;
+
+  // If function is golang stores the offset to functab entry
+  uint32_t GolangFunctabOffset = 0;
 
 private:
   /// Current state of the function.
@@ -363,6 +370,9 @@ private:
   /// True if another function body was merged into this one.
   bool HasFunctionsFoldedInto{false};
 
+  /// True if we have a suspicion that the function was written in ASM
+  bool IsAsm{false};
+
   /// Name for the section this function code should reside in.
   std::string CodeSectionName;
 
@@ -423,7 +433,7 @@ private:
   const MCSymbol *PLTSymbol{nullptr};
 
   /// Function order for streaming into the destination binary.
-  uint32_t Index{-1U};
+  uint32_t Index{INVALID_BF_INDEX};
 
   /// Get basic block index assuming it belongs to this function.
   unsigned getIndex(const BinaryBasicBlock *BB) const {
@@ -1059,16 +1069,20 @@ public:
   uint64_t getOutputSize() const { return OutputSize; }
 
   /// Does this function have a valid streaming order index?
-  bool hasValidIndex() const { return Index != -1U; }
+  bool hasValidIndex() const { return Index != INVALID_BF_INDEX; }
 
   /// Get the streaming order index for this function.
   uint32_t getIndex() const { return Index; }
 
   /// Set the streaming order index for this function.
   void setIndex(uint32_t Idx) {
-    assert(!hasValidIndex());
+    assert(!hasValidIndex() && "Index can only be set once");
     Index = Idx;
   }
+
+  /// Reset the streaming order index (used by the Golang pass, which
+  /// re-assigns indexes when it re-orders the Go function table).
+  void resetIndex() { Index = INVALID_BF_INDEX; }
 
   /// Return offset of the function body in the binary file.
   uint64_t getFileOffset() const {
@@ -1298,6 +1312,9 @@ public:
     return HasIndirectTargetToSplitFragment;
   }
 
+  /// Return true if we have a suspicion that the function was written in ASM
+  bool isAsm() const { return IsAsm; }
+
   /// Return true if all CFG edges have local successors.
   bool hasCanonicalCFG() const { return HasCanonicalCFG; }
 
@@ -1333,6 +1350,15 @@ public:
 
   /// Return true if other functions were folded into this one.
   bool hasFunctionsFoldedInto() const { return HasFunctionsFoldedInto; }
+
+  /// Sets golang funtab offset for this function
+  void setGolangFunctabOffset(uint32_t Offset) { GolangFunctabOffset = Offset; }
+
+  /// Return true if the function is presented in original go functab
+  bool isGolang() const { return GolangFunctabOffset != 0; }
+
+  /// Get golang funtab offset for this function
+  uint32_t getGolangFunctabOffset() const { return GolangFunctabOffset; }
 
   /// If this function was folded, return the function it was folded into.
   BinaryFunction *getFoldedIntoFunction() const { return FoldedIntoFunction; }
@@ -1691,6 +1717,8 @@ public:
     return *this;
   }
 
+  void setPreserveNops(bool Preserve) { PreserveNops = Preserve; }
+
   void setPseudo(bool Pseudo) { IsPseudo = Pseudo; }
 
   BinaryFunction &setUsesGnuArgsSize(bool Uses = true) {
@@ -1713,6 +1741,8 @@ public:
   }
 
   void setHasCanonicalCFG(bool V) { HasCanonicalCFG = V; }
+
+  void setIsAsm(bool V) { IsAsm = V; }
 
   void setFolded(BinaryFunction *BF) { FoldedIntoFunction = BF; }
 
@@ -2314,14 +2344,14 @@ public:
     size_t Estimate = 0;
     for (const BinaryBasicBlock &BB : blocks())
       if (BB.isCold())
-        Estimate += BC.computeCodeSize(BB.begin(), BB.end());
+        Estimate += BB.estimateSize();
     return Estimate;
   }
 
   size_t estimateSize() const {
     size_t Estimate = 0;
     for (const BinaryBasicBlock &BB : blocks())
-      Estimate += BC.computeCodeSize(BB.begin(), BB.end());
+      Estimate += BB.estimateSize();
     return Estimate;
   }
 
