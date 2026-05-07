@@ -3309,7 +3309,7 @@ bool BinaryFunction::requiresAddressMap() const {
     return false;
 
   return opts::UpdateDebugSections || isMultiEntry() ||
-         requiresAddressTranslation();
+         requiresAddressTranslation() || isGolang();
 }
 
 uint64_t BinaryFunction::getInstructionCount() const {
