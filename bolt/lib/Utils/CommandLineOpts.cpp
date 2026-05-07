@@ -281,6 +281,11 @@ cl::opt<bool> UpdateDebugSections(
     cl::desc("update DWARF debug sections of the executable"),
     cl::cat(BoltCategory));
 
+cl::opt<bool>
+    KeepNops("keep-nops",
+             cl::desc("keep no-op instructions. By default they are removed."),
+             cl::Hidden, cl::cat(BoltOptCategory));
+
 cl::opt<unsigned>
     Verbosity("v", cl::desc("set verbosity level for diagnostic output"),
               cl::init(0), cl::ZeroOrMore, cl::cat(BoltCategory),

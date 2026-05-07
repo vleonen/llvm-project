@@ -86,6 +86,8 @@ extern llvm::cl::opt<bool> TimeOpts;
 extern llvm::cl::opt<bool> UseOldText;
 extern llvm::cl::opt<bool> UpdateDebugSections;
 
+extern llvm::cl::opt<bool> KeepNops;
+
 // The default verbosity level (0) is pretty terse, level 1 is fairly
 // verbose and usually prints some informational message for every
 // function processed.  Level 2 is for the noisiest of messages and
