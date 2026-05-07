@@ -2319,6 +2319,20 @@ void BinaryContext::exitWithBugReport(StringRef Message,
   exit(1);
 }
 
+/// Returns std pair of binary functons desired and maximum alignment bytes
+std::pair<unsigned, unsigned>
+BinaryContext::getBFAlignment(BinaryFunction &Function,
+                              bool EmitColdPart) const {
+  unsigned Alignment = Function.getAlignment();
+  if (HasRelocations) {
+    unsigned MaxAlignBytes = EmitColdPart ? Function.getMaxColdAlignmentBytes()
+                                          : Function.getMaxAlignmentBytes();
+    return std::make_pair(Alignment, MaxAlignBytes);
+  }
+
+  return std::make_pair(Alignment, Alignment);
+}
+
 BinaryFunction *
 BinaryContext::createInjectedBinaryFunction(const std::string &Name,
                                             bool IsSimple) {

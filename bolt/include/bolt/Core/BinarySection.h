@@ -361,6 +361,18 @@ public:
     return false;
   }
 
+  /// Remove the dynamic relocation (if any) at the given /p Offset.
+  bool removeDynamicRelocationAt(uint64_t Offset) {
+    Relocation Key{Offset, 0, 0, 0, 0};
+    auto Itr = DynamicRelocations.find(Key);
+    if (Itr != DynamicRelocations.end()) {
+      DynamicRelocations.erase(Itr);
+      return true;
+    }
+
+    return false;
+  }
+
   void clearRelocations();
 
   /// Add a new relocation at the given /p Offset.

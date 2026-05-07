@@ -53,6 +53,8 @@ protected:
   uint64_t Address{0};
   /// Size of this data (can be 0).
   uint64_t Size{0};
+  /// Output size of this data (if changed).
+  uint64_t OutputSize{0};
   /// Alignment of this data.
   uint16_t Alignment{1};
 
@@ -133,7 +135,8 @@ public:
   StringRef getOutputSectionName() const;
   uint64_t getOutputAddress() const;
   uint64_t getOutputOffset() const { return OutputOffset; }
-  uint64_t getOutputSize() const { return Size; }
+  uint64_t getOutputSize() const { return OutputSize ? OutputSize : Size; }
+  void setOutputSize(uint64_t NewSize) { OutputSize = NewSize; }
 
   bool isMoved() const;
   bool containsAddress(uint64_t Address) const {

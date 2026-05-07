@@ -594,6 +594,10 @@ public:
     return const_cast<BinaryContext *>(this)->getFirstBinaryDataByName(Name);
   }
 
+  /// Returns std pair of binary functons desired and maximum alignment bytes
+  std::pair<unsigned, unsigned> getBFAlignment(BinaryFunction &Function,
+                                               bool EmitColdPart) const;
+
   /// Create BOLT-injected function
   BinaryFunction *createInjectedBinaryFunction(const std::string &Name,
                                                bool IsSimple = true);

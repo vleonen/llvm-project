@@ -111,6 +111,12 @@ struct Relocation {
   /// Return code for a PC-relative 8-byte relocation
   static uint64_t getPC64();
 
+  /// Return code for ABS relocation based on size
+  static uint64_t getAbs(uint8_t Size);
+
+  /// Return code for a ABS 4-byte relocation
+  static uint64_t getAbs32();
+
   /// Return code for a ABS 8-byte relocation
   static uint64_t getAbs64();
 
