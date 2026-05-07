@@ -63,6 +63,14 @@ class MCPlusBuilder {
 public:
   using AllocatorIdTy = uint16_t;
 
+  /// Mode flags mirrored from the global options after command-line
+  /// adjustment, so that target builders (separate libraries) can gate
+  /// behavior without linking the options library.
+  /// KeepNopsMode mirrors opts::KeepNops; GolangMode mirrors
+  /// opts::GolangPass != GV_NONE.
+  bool KeepNopsMode = false;
+  bool GolangMode = false;
+
 private:
   /// A struct that represents a single annotation allocator
   struct AnnotationAllocator {
@@ -1004,6 +1012,12 @@ public:
     llvm_unreachable("not implemented");
   }
 
+  /// Get stack adjustment value
+  virtual int getStackAdjustment(const MCInst &Inst) const {
+    llvm_unreachable("not implemented");
+    return false;
+  }
+
   /// Identify stack adjustment instructions -- those that change the stack
   /// pointer by adding or subtracting an immediate.
   virtual bool isStackAdjustment(const MCInst &Inst) const {
@@ -1450,6 +1464,12 @@ public:
     return false;
   }
 
+  /// Replace instruction with relaxed version of it
+  virtual bool relaxInstruction(MCInst &Inst) const {
+    llvm_unreachable("not implemented");
+    return false;
+  }
+
   /// Lower a tail call instruction \p Inst if required by target.
   virtual bool lowerTailCall(MCInst &Inst) {
     llvm_unreachable("not implemented");
@@ -1859,6 +1879,50 @@ public:
     return Index;
   }
 
+  bool areAnnotationsEqual(const MCInst &A, const MCInst &B,
+                           bool GenericOnly = true) const {
+    // Get annotation iterators for both instructions
+    auto getAnnotationMap = [this, GenericOnly](const MCInst &Inst) {
+      std::unordered_map<uint8_t, int64_t> AnnotationMap;
+      std::optional<unsigned> FirstAnnotationOp =
+          getFirstAnnotationOpIndex(Inst);
+      if (!FirstAnnotationOp)
+        return AnnotationMap;
+
+      for (unsigned I = *FirstAnnotationOp; I < Inst.getNumOperands(); ++I) {
+        const int64_t ImmValue = Inst.getOperand(I).getImm();
+        uint8_t Index = extractAnnotationIndex(ImmValue);
+
+        // Skip target-specific annotations if GenericOnly is true
+        // Generic annotations use indices 0-127, target-specific use 128-255
+        if (GenericOnly && Index >= 128)
+          continue;
+
+        int64_t Value = extractAnnotationValue(ImmValue);
+        AnnotationMap[Index] = Value;
+      }
+      return AnnotationMap;
+    };
+
+    auto AnnotationsA = getAnnotationMap(A);
+    auto AnnotationsB = getAnnotationMap(B);
+
+    // Check if both have same number of annotations (considering filter)
+    if (AnnotationsA.size() != AnnotationsB.size())
+      return false;
+
+    // Compare each annotation value
+    for (const auto &[Index, Value] : AnnotationsA) {
+      auto It = AnnotationsB.find(Index);
+      if (It == AnnotationsB.end())
+        return false;
+      if (It->second != Value)
+        return false;
+    }
+
+    return true;
+  }
+
   /// Store an annotation value on an MCInst.  This assumes the annotation
   /// is not already present.
   template <typename ValueType>
@@ -2045,6 +2109,21 @@ public:
   createInstrumentedIndCallHandlerEntryBB(const MCSymbol *InstrTrampoline,
                                           const MCSymbol *IndCallHandler,
                                           MCContext *Ctx) {
+    llvm_unreachable("not implemented");
+    return InstructionListType();
+  }
+
+  virtual InstructionListType
+  createInstrumentFiniCall(MCSymbol *HandlerFuncAddr, MCContext *Ctx,
+                           bool IsTailCall) {
+    llvm_unreachable("not implemented");
+    return std::vector<MCInst>();
+  }
+
+  virtual InstructionListType createIndirectCall(const MCSymbol *TargetLocation,
+                                                 MCContext *Ctx,
+                                                 bool IsTailCall,
+                                                 MCPhysReg Reg) {
     llvm_unreachable("not implemented");
     return InstructionListType();
   }

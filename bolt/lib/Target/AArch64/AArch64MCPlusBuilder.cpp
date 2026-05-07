@@ -1089,6 +1089,11 @@ public:
     return true;
   }
 
+  bool relaxInstruction(MCInst &Inst) const override {
+    (void)Inst;
+    return false;
+  }
+
   bool lowerTailCall(MCInst &Inst) override {
     removeAnnotation(Inst, MCPlus::MCAnnotation::kTailCall);
     if (getConditionalTailCall(Inst))
@@ -1455,6 +1460,32 @@ public:
                             int64_t Disp) const {
     Inst.setOpcode(AArch64::BR);
     Inst.addOperand(MCOperand::createReg(MemBaseReg));
+  }
+
+  InstructionListType createIndirectCall(const MCSymbol *TargetLocation,
+                                         MCContext *Ctx, bool IsTailCall,
+                                         MCPhysReg Reg) override {
+    InstructionListType Inst = materializeAddress(TargetLocation, Ctx, Reg);
+    Inst.emplace_back();
+    loadReg(Inst.back(), Reg, Reg);
+    Inst.emplace_back();
+    createIndirectCallInst(Inst.back(), IsTailCall, Reg);
+    return Inst;
+  }
+
+  InstructionListType createInstrumentFiniCall(MCSymbol *HandlerFuncAddr,
+                                               MCContext *Ctx,
+                                               bool IsTailCall) override {
+    InstructionListType Insts(6);
+    storeReg(Insts[0], AArch64::X0, getSpRegister(/*Size*/ 8));
+    std::vector<MCInst> Addr =
+        createIndirectCall(HandlerFuncAddr, Ctx, IsTailCall, AArch64::X0);
+    assert(Addr.size() == 4 && "Invalid Addr size");
+    std::copy(Addr.begin(), Addr.end(), Insts.end() - Addr.size() - 1);
+    loadReg(Insts[5], AArch64::X0, getSpRegister(/*Size*/ 8));
+    for (MCInst &NewInst : Insts)
+      addAnnotation(NewInst, "IsInstrumentation", true);
+    return Insts;
   }
 
   InstructionListType createInstrumentedIndCallHandlerExitBB() const override {
