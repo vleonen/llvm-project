@@ -199,6 +199,9 @@ public:
   static constexpr uint64_t COUNT_NO_PROFILE =
       BinaryBasicBlock::COUNT_NO_PROFILE;
 
+  /// We have to use at least 2-byte alignment for functions because of C++ ABI.
+  static constexpr unsigned MinAlign = 2;
+
   static const char TimerGroupName[];
   static const char TimerGroupDesc[];
 
@@ -251,7 +254,7 @@ private:
   uint64_t MaxSize{std::numeric_limits<uint64_t>::max()};
 
   /// Alignment requirements for the function.
-  uint16_t Alignment{2};
+  uint16_t Alignment{MinAlign};
 
   /// Maximum number of bytes used for alignment of hot part of the function.
   uint16_t MaxAlignmentBytes{0};

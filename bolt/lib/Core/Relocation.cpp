@@ -931,6 +931,24 @@ bool Relocation::isPCRelative(uint32_t Type) {
   }
 }
 
+uint64_t Relocation::getAbs(uint8_t Size) {
+  if (Size == sizeof(uint64_t))
+    return Relocation::getAbs64();
+  else if (Size == sizeof(uint32_t))
+    return Relocation::getAbs32();
+
+  llvm_unreachable("Wrong relocation size");
+  return 0;
+}
+
+uint64_t Relocation::getAbs32() {
+  if (Arch == Triple::aarch64)
+    return ELF::R_AARCH64_ABS32;
+  if (Arch == Triple::riscv64)
+    return ELF::R_RISCV_32;
+  return ELF::R_X86_64_32;
+}
+
 uint32_t Relocation::getAbs64() {
   switch (Arch) {
   default:
