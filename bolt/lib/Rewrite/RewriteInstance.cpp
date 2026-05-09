@@ -56,6 +56,7 @@
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/ToolOutputFile.h"
@@ -1101,11 +1102,50 @@ void RewriteInstance::discoverFileObjects() {
 
     if (SymbolAddress == Section->getAddress() + Section->getSize()) {
       assert(SymbolSize == 0 &&
-             "unexpect non-zero sized symbol at end of section");
-      LLVM_DEBUG(
-          dbgs()
-          << "BOLT-DEBUG: rejecting as symbol points to end of its section\n");
-      registerName(SymbolSize);
+             "unexpected non-zero sized symbol at end of section");
+
+      // AArch64-specific: Check for mapping symbols that might be at section
+      // end
+      if (BC->isAArch64() && BC->isMarker(Symbol)) {
+        LLVM_DEBUG(
+            dbgs() << "BOLT-DEBUG: AArch64 marker symbol at section end: "
+                   << UniqueName << "\n");
+        registerName(SymbolSize);
+        continue;
+      }
+
+      // Register as EndSymbol if it's a regular end symbol
+      if (auto BSec =
+              BC->getUniqueSectionByName(cantFail(Section->getName()))) {
+        BC->registerEndSymbol(UniqueName, &*BSec);
+        registerName(SymbolSize);
+        LLVM_DEBUG(dbgs() << formatv("BOLT-INFO: {0} is in the end of {1}\n",
+                                     Name, BSec->getName()));
+      } else {
+        LLVM_DEBUG(dbgs() << "BOLT-DEBUG: rejecting as symbol points to end of "
+                             "its section\n");
+      }
+      continue;
+    }
+
+    // Handle linker script gap symbols that point to addresses beyond section
+    // These are symbols like __fini_array_end that are defined after section
+    // gaps
+    if (SymbolAddress > Section->getAddress() + Section->getSize() &&
+        SymbolAddress <= Section->getAddress() + Section->getSize() + 4096 &&
+        (Name == "__fini_array_end" || Name == "__init_array_end" ||
+         Name == "_end" || Name == "etext" || Name == "_edata")) {
+      // Check if this is within a reasonable range after the section
+      // (likely a linker script gap symbol)
+      if (auto BSec =
+              BC->getUniqueSectionByName(cantFail(Section->getName()))) {
+        BC->registerEndSymbol(UniqueName, &*BSec);
+        registerName(SymbolSize);
+        LLVM_DEBUG(
+            dbgs() << formatv(
+                "BOLT-INFO: {0} is in the end of {1} (linker script gap)\n",
+                Name, BSec->getName()));
+      }
       continue;
     }
 
@@ -2511,6 +2551,11 @@ bool RewriteInstance::analyzeRelocation(
   } else {
     const SymbolRef &Symbol = *SymbolIter;
     SymbolName = std::string(cantFail(Symbol.getName()));
+    if (auto It = BC->EndSymbols.find(SymbolName); It != BC->EndSymbols.end()) {
+      bool IsAdr = IsAArch64 && (*Value & 0x9f000000) == 0x10000000;
+      if (IsAdr)
+        Skip = false;
+    }
     SymbolAddress = cantFail(Symbol.getAddress());
     SkipVerification = (cantFail(Symbol.getType()) == SymbolRef::ST_Other);
     // Section symbols are marked as ST_Debug.
@@ -2973,7 +3018,9 @@ void RewriteInstance::handleRelocation(const SectionRef &RelocatedSection,
   }
 
   MCSymbol *ReferencedSymbol = nullptr;
-  if (!IsSectionRelocation) {
+  if (auto It = BC->EndSymbols.find(SymbolName); It != BC->EndSymbols.end()) {
+    ReferencedSymbol = BC->Ctx->getOrCreateSymbol(SymbolName);
+  } else if (!IsSectionRelocation) {
     if (BinaryData *BD = BC->getBinaryDataByName(SymbolName)) {
       ReferencedSymbol = BD->getSymbol();
     } else if (BC->isGOTSymbol(SymbolName)) {
@@ -6427,7 +6474,13 @@ void RewriteInstance::patchELFAllocatableRelaSections(
           SymbolIdx = getOutputDynamicSymbolIndex(Symbol);
         } else {
           // Usually this case is used for R_*_(I)RELATIVE relocations
-          const uint64_t Address = getNewFunctionOrDataAddress(Addend);
+          // Check if it's end-of-section relocation first because they're
+          // tricky
+          uint64_t Address = Section.getNewEndSymbolValue(Rel.Offset);
+
+          if (!Address)
+            Address = getNewFunctionOrDataAddress(Addend);
+
           if (Address)
             Addend = Address;
         }
