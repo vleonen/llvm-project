@@ -304,6 +304,12 @@ public:
   /// overwritten, but it is okay to re-generate debug info for them.
   std::set<const DWARFUnit *> ProcessedCUs;
 
+  /// Map of section-end symbol names to their corresponding BinarySection
+  /// Examples: "etext" -> .text section, "__fini_array_end" -> .fini_array
+  /// section These symbols point to the end of a section (address + size)
+  /// AArch64-specific: Handles $x/$d mapping symbols as end symbols
+  StringMap<BinarySection *> EndSymbols;
+
   // Setup MCPlus target builder
   void initializeTarget(std::unique_ptr<MCPlusBuilder> TargetBuilder) {
     MIB = std::move(TargetBuilder);
@@ -862,6 +868,7 @@ public:
   // code/data in .text. Code is marked by $x, data by $d.
   MarkerSymType getMarkerType(const SymbolRef &Symbol) const;
   bool isMarker(const SymbolRef &Symbol) const;
+  MarkerSymType getMarkerTypeForString(StringRef Name) const;
 
   /// Iterate over all BinaryData.
   iterator_range<binary_data_const_iterator> getBinaryData() const {
@@ -948,6 +955,18 @@ public:
   MCSymbol *registerNameAtAddress(StringRef Name, uint64_t Address,
                                   uint64_t Size, uint16_t Alignment,
                                   unsigned Flags = 0);
+
+  /// Register a section-end symbol with \p Name for \p Section.
+  /// AArch64-specific: Checks for mapping symbols and handles them
+  /// appropriately
+  void registerEndSymbol(StringRef Name, BinarySection *Section);
+
+  /// Unregister a section-end symbol with \p Name.
+  void unregisterEndSymbol(StringRef Name);
+
+  /// Find the section associated with section-end symbol \p Name.
+  /// Returns nullptr if the symbol is not a registered end symbol.
+  BinarySection *findEndSymbolSection(StringRef Name) const;
 
   /// Return BinaryData registered at a given \p Address or nullptr if no
   /// global symbol was registered at the location.

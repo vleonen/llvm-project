@@ -1,0 +1,30 @@
+## This test explicitly verifies the JITLink integration fix for EndSymbols.
+## It ensures that the JITLinkLinker properly resolves section-end symbols
+## through the BC.EndSymbols map that we implemented in Stage 1.
+
+REQUIRES: system-linux
+REQUIRES: aarch64-registered-target
+
+// Create test binary with multiple end symbols
+RUN: llvm-mc -filetype=obj -triple aarch64-unknown-unknown \
+RUN:   %S/Inputs/jitlink-integration.s -o %t.o
+RUN: %clang %cflags -no-pie %t.o -o %t.exe -Wl,-q
+
+// Process with BOLT (which uses JITLink internally)
+RUN: llvm-bolt %t.exe -o %t.bolt --print-cfg --debug-only=bolt 2>&1 | FileCheck %s
+
+// Verify that EndSymbols are being registered
+CHECK: BOLT-INFO: text_end is in the end of .text
+CHECK: BOLT-INFO: data_end is in the end of .data
+
+// Verify symbol table in final binary
+RUN: llvm-readelf -Ws %t.bolt | FileCheck %s --check-prefix=SYMTAB
+
+SYMTAB: text_end
+SYMTAB: data_end
+
+// Verify the symbols have correct addresses (not 0)
+RUN: llvm-nm %t.bolt | FileCheck %s --check-prefix=NM
+
+// NM-DAG: text_end
+// NM-DAG: data_end

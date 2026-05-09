@@ -1463,6 +1463,28 @@ bool BinaryFunction::disassemble() {
 
       if (!BC.isRISCV() && MIB->hasPCRelOperand(Instruction) && !UsedReloc)
         handlePCRelOperand(Instruction, AbsoluteInstrAddr, Size);
+    } else {
+      for (auto RelIt = Relocations.lower_bound(Offset),
+                End = Relocations.lower_bound(Offset + Size);
+           RelIt != End; ++RelIt) {
+        Relocation &Rel = RelIt->second;
+        if (auto *Sym = Rel.Symbol)
+          if (auto It = BC.EndSymbols.find(Sym->getName());
+              It != BC.EndSymbols.end()) {
+            int64_t Value;
+            LLVM_DEBUG(
+                dbgs() << formatv(
+                    "BOLT-INFO: end symbol {0} referenced in {1} + {2:x}\n",
+                    Sym->getName(), getOneName(), Offset););
+            if (BC.MIB->replaceImmWithSymbolRef(Instruction, Sym, Rel.Addend,
+                                                Ctx.get(), Value, Rel.Type)) {
+              continue;
+            }
+            LLVM_DEBUG(dbgs() << "BOLT-DEBUG: failed to replace immediate "
+                                 "with end symbol reference; keeping the "
+                                 "raw immediate\n");
+          }
+      }
     }
 
 add_instruction:

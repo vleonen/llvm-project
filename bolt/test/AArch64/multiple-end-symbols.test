@@ -1,0 +1,14 @@
+; Test that multiple end symbols in different sections are detected
+; Verify BOLT detects all end symbols (etext, _edata, _end)
+
+REQUIRES: system-linux
+REQUIRES: aarch64-registered-target
+
+RUN: llvm-mc -filetype=obj -triple aarch64-unknown-linux-gnu %S/Inputs/multiple-end-symbols.s -o %t.o
+RUN: %clang %cflags -no-pie %t.o -o %t.exe -nostdlib -Wl,-q
+
+RUN: llvm-bolt %t.exe -o %t.bolt --debug-only=bolt 2>&1 | FileCheck %s
+
+CHECK-DAG: BOLT-INFO: etext is in the end of .text
+CHECK-DAG: BOLT-INFO: _edata is in the end of .data
+CHECK-DAG: BOLT-INFO: _end is in the end of .bss

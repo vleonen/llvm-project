@@ -986,6 +986,30 @@ void BinaryContext::adjustCodePadding() {
   }
 }
 
+void BinaryContext::registerEndSymbol(StringRef Name, BinarySection *Section) {
+  // AArch64-specific: Check for mapping symbols ($x/$d) which should not be
+  // registered as EndSymbols as they are used for code/data delimitation
+  if (isAArch64()) {
+    MarkerSymType Marker = getMarkerTypeForString(Name);
+    if (Marker != MarkerSymType::NONE) {
+      LLVM_DEBUG(
+          dbgs() << "BOLT-INFO: Not registering marker symbol as EndSymbol: "
+                 << Name << "\n");
+      return;
+    }
+  }
+  EndSymbols[Name.str()] = Section;
+}
+
+void BinaryContext::unregisterEndSymbol(StringRef Name) {
+  EndSymbols.erase(Name.str());
+}
+
+BinarySection *BinaryContext::findEndSymbolSection(StringRef Name) const {
+  auto It = EndSymbols.find(Name.str());
+  return It != EndSymbols.end() ? It->second : nullptr;
+}
+
 MCSymbol *BinaryContext::registerNameAtAddress(StringRef Name, uint64_t Address,
                                                uint64_t Size,
                                                uint16_t Alignment,
@@ -1284,13 +1308,36 @@ void BinaryContext::processInterproceduralReferences() {
     // Check if address falls in function padding space - this could be
     // unmarked data in code. In this case adjust the padding space size.
     ErrorOr<BinarySection &> Section = getSectionForAddress(Address);
-    assert(Section && "cannot get section for referenced address");
+
+    // Handle EndSymbols that point to section boundaries. If the address
+    // matches a registered EndSymbol (i.e., SectionEndAddress = SectionStart +
+    // Size), skip validation as EndSymbols are intentional section markers, not
+    // code.
+    bool IsEndSymbol = false;
+    if (!Section) {
+      for (const auto &[Name, EndSec] : EndSymbols) {
+        if (Address == EndSec->getAddress() + EndSec->getSize()) {
+          LLVM_DEBUG(dbgs()
+                     << "BOLT-DEBUG: skipping EndSymbol reference to " << Name
+                     << " at 0x" << Twine::utohexstr(Address) << "\n");
+          IsEndSymbol = true;
+          break;
+        }
+      }
+      if (!IsEndSymbol) {
+        assert(Section && "cannot get section for referenced address");
+      }
+    }
+
+    if (IsEndSymbol)
+      continue;
 
     if (!Section->isText())
       continue;
 
     // PLT requires special handling and could be ignored in this context.
-    StringRef SectionName = Section->getName();
+    StringRef SectionName;
+    SectionName = Section->getName();
     if (SectionName == ".plt" || SectionName == ".plt.got")
       continue;
 
@@ -1833,6 +1880,26 @@ MarkerSymType BinaryContext::getMarkerType(const SymbolRef &Symbol) const {
 
 bool BinaryContext::isMarker(const SymbolRef &Symbol) const {
   return getMarkerType(Symbol) != MarkerSymType::NONE;
+}
+
+MarkerSymType BinaryContext::getMarkerTypeForString(StringRef Name) const {
+  // For aarch64 and riscv, the ABI defines mapping symbols so we identify data
+  // in the code section (see IHI0056B). $x identifies a symbol starting code or
+  // the end of a data chunk inside code, $d identifies start of data.
+  if (!isAArch64() && !isRISCV())
+    return MarkerSymType::NONE;
+
+  if (Name == "$x" || Name.starts_with("$x."))
+    return MarkerSymType::CODE;
+
+  // $x<ISA> for RISCV
+  if (isRISCV() && Name.starts_with("$x"))
+    return MarkerSymType::CODE;
+
+  if (Name == "$d" || Name.starts_with("$d."))
+    return MarkerSymType::DATA;
+
+  return MarkerSymType::NONE;
 }
 
 static void printDebugInfo(raw_ostream &OS, const MCInst &Instruction,

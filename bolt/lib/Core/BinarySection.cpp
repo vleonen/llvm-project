@@ -33,6 +33,19 @@ bool BinarySection::isELF() const { return BC.isELF(); }
 
 bool BinarySection::isMachO() const { return BC.isMachO(); }
 
+uint64_t BinarySection::getNewEndSymbolValue(uint64_t RelocationOffset) const {
+  if (const Relocation *R = getRelocationAt(RelocationOffset))
+    if (auto *Sym = R->Symbol)
+      if (auto BSecIt = BC.EndSymbols.find(Sym->getName());
+          BSecIt != BC.EndSymbols.end()) {
+        BinarySection *BSec = BSecIt->second;
+        assert(BSec->getOutputAddress() && "Unmapped section!");
+        uint64_t NewValue = BSec->getOutputAddress() + BSec->getOutputSize();
+        return NewValue;
+      }
+  return 0;
+}
+
 uint64_t
 BinarySection::hash(const BinaryData &BD,
                     std::map<const BinaryData *, uint64_t> &Cache) const {

@@ -415,6 +415,8 @@ public:
     return Itr != DynamicRelocations.end() ? &*Itr : nullptr;
   }
 
+  uint64_t getNewEndSymbolValue(uint64_t RelocationOffset) const;
+
   std::optional<Relocation> takeDynamicRelocationAt(uint64_t Offset) {
     Relocation Key{Offset, 0, 0, 0, 0};
     auto Itr = DynamicRelocations.find(Key);

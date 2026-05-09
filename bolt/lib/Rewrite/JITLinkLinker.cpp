@@ -13,6 +13,7 @@
 #include "llvm/ExecutionEngine/Orc/Shared/ExecutorAddress.h"
 #include "llvm/ExecutionEngine/Orc/Shared/ExecutorSymbolDef.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/FormatVariadic.h"
 
 #define DEBUG_TYPE "bolt"
 
@@ -206,6 +207,24 @@ void JITLinkLinker::loadObject(MemoryBufferRef Obj,
 
 std::optional<JITLinkLinker::SymbolInfo>
 JITLinkLinker::lookupSymbolInfo(StringRef Name) const {
+  // Check EndSymbols first
+  if (auto It = BC.EndSymbols.find(Name.data()); It != BC.EndSymbols.end()) {
+    BinarySection *BSec = It->second;
+    // Safe filtering: Section might not be mapped yet if JITLink resolves
+    // symbols early. Unmapped sections have getOutputAddress() == 0.
+    if (!BSec->getOutputAddress()) {
+      LLVM_DEBUG(
+          dbgs() << formatv("EndSymbol {0} references unmapped section {1}. "
+                            "Using fallback resolution.\n",
+                            Name, BSec->getOutputName()););
+      return std::nullopt; // Trigger existing fallback logic
+    }
+    uint64_t Address = BSec->getOutputAddress() + BSec->getOutputSize();
+    LLVM_DEBUG(dbgs() << formatv("Resolved {0} as the end of {1} at {2:x}\n",
+                                 Name, BSec->getOutputName(), Address););
+    return SymbolInfo{Address, 0};
+  }
+
   auto It = Symtab.find(Name.data());
   if (It == Symtab.end())
     return std::nullopt;

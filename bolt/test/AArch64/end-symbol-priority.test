@@ -1,0 +1,18 @@
+## This test verifies JITLinkLinker::lookupSymbolInfo() properly checks
+## EndSymbols before regular symbols in the symbol table.
+
+REQUIRES: system-linux
+REQUIRES: aarch64-registered-target
+
+RUN: llvm-mc -filetype=obj -triple aarch64-unknown-unknown \
+RUN:   %S/Inputs/end-symbol-priority.s -o %t.o
+RUN: %clang %cflags -no-pie %t.o -o %t.exe -Wl,-q
+
+// Process with BOLT to trigger JITLink resolution
+RUN: llvm-bolt %t.exe -o %t.bolt --debug-only=bolt 2>&1 | FileCheck %s
+
+// The test creates a scenario where there could be ambiguity between
+// a regular symbol and an EndSymbol. The EndSymbols should be checked first.
+
+CHECK: BOLT-INFO: .my_end_symbol is in the end of .text
+CHECK-NOT: BOLT-DEBUG: rejecting as symbol points to end of its section

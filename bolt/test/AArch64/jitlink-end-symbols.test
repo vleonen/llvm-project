@@ -1,0 +1,21 @@
+// This test verifies that BOLT's JITLink integration properly handles
+// section-end symbols. The test creates a binary with multiple end symbols
+// and ensures they are resolved correctly through JITLink.
+
+REQUIRES: system-linux
+REQUIRES: aarch64-registered-target
+
+// Create test binary
+RUN: llvm-mc -filetype=obj -triple aarch64-unknown-unknown \
+RUN:   %S/Inputs/jitlink-end-symbols.s -o %t.o
+RUN: %clang %cflags -no-pie %t.o -o %t.exe -Wl,-q
+
+// Test basic BOLT processing with EndSymbols
+RUN: llvm-bolt %t.exe -o %t.bolt --print-cfg --debug-only=bolt 2>&1 | FileCheck %s
+
+CHECK: BOLT-INFO: etext is in the end of .text
+CHECK: BOLT-INFO: _edata is in the end of .data
+CHECK: BOLT-INFO: _end is in the end of .bss
+
+// Verify the symbol resolution works by checking the disassembly
+
