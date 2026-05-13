@@ -345,6 +345,9 @@ public:
   /// Does this section have any pending relocations?
   bool hasPendingRelocations() const { return !PendingRelocations.empty(); }
 
+  /// Does this section have any dynamic relocations?
+  bool hasDynamicRelocations() const { return !DynamicRelocations.empty(); }
+
   /// Remove non-pending relocation with the given /p Offset.
   bool removeRelocationAt(uint64_t Offset) {
     auto Itr = Relocations.find(Offset);
