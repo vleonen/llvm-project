@@ -19,6 +19,7 @@
 #include "bolt/Core/Relocation.h"
 #include "bolt/Passes/BinaryPasses.h"
 #include "bolt/Passes/CacheMetrics.h"
+#include "bolt/Passes/Golang.h"
 #include "bolt/Passes/IdenticalCodeFolding.h"
 #include "bolt/Passes/PAuthGadgetScanner.h"
 #include "bolt/Passes/ReorderFunctions.h"
@@ -89,6 +90,9 @@ extern cl::opt<bolt::ReorderFunctions::ReorderType> ReorderFunctions;
 extern cl::opt<bool> TerminalTrap;
 extern cl::opt<bool> TimeBuild;
 extern cl::opt<bool> TimeRewrite;
+extern cl::opt<bool> AlignBlocks;
+extern cl::opt<bool> PreserveBlocksAlignment;
+extern cl::opt<FrameOptimizationType> FrameOptimization;
 extern cl::opt<bolt::IdenticalCodeFolding::ICFLevel, false,
                llvm::bolt::DeprecatedICFNumericOptionParser>
     ICF;
@@ -2436,6 +2440,13 @@ void RewriteInstance::adjustCommandLineOptions() {
   if (opts::AlignText < opts::AlignFunctions)
     opts::AlignText = (unsigned)opts::AlignFunctions;
 
+  if (opts::GolangPass != opts::GV_NONE &&
+      (opts::AlignBlocks || opts::PreserveBlocksAlignment)) {
+    errs() << "BOLT-WARNING: Disabling block alignment\n";
+    opts::AlignBlocks = false;
+    opts::PreserveBlocksAlignment = false;
+  }
+
   if (BC->isX86() && opts::Lite.getNumOccurrences() == 0 && !opts::StrictMode &&
       !opts::UseOldText)
     opts::Lite = true;
@@ -2462,6 +2473,47 @@ void RewriteInstance::adjustCommandLineOptions() {
     // Linux kernel may resume execution after a trap instruction in some cases.
     if (!opts::TerminalTrap.getNumOccurrences())
       opts::TerminalTrap = false;
+  }
+
+  // Golang support adjustments
+  if (opts::GolangPass != opts::GV_NONE) {
+    opts::KeepNops = true;
+
+    if (opts::FrameOptimization != FOP_NONE) {
+      errs() << "BOLT-WARNING: Golang does not support frame optimizations\n";
+      opts::FrameOptimization = FOP_NONE;
+    }
+
+    if (opts::Lite) {
+      errs() << "BOLT-WARNING: Lite mode is not compatible with -golang. "
+                "Disabling.\n";
+      opts::Lite = false;
+    }
+
+    if (opts::HotFunctionsAtEnd) {
+      errs() << "BOLT-WARNING: Golang does not support hot functions at end. "
+                "Disabling.\n";
+      opts::HotFunctionsAtEnd = false;
+    }
+
+    if (!opts::AlignFunctions.getNumOccurrences()) {
+      opts::AlignFunctions = 16u;
+      outs() << "BOLT-INFO: using alignment 16 for golang\n";
+    }
+
+    if (opts::AlignFunctions < 16u) {
+      outs() << formatv(
+          "BOLT-WARNING: golang requires at least 16 bytes of "
+          "alignment for functions, overriding provided {0} with 16\n",
+          (unsigned)opts::AlignFunctions);
+      opts::AlignFunctions = 16u;
+    }
+
+    if (!opts::AlignText.getNumOccurrences()) {
+      opts::AlignText = (unsigned)opts::AlignFunctions;
+      outs() << formatv("BOLT-INFO: using text alignment {0} for golang\n",
+                        (unsigned)opts::AlignText);
+    }
   }
 
   // Mirror the adjusted mode options into the target builder so that
@@ -3694,6 +3746,11 @@ void RewriteInstance::processProfileData() {
 void RewriteInstance::disassembleFunctions() {
   NamedRegionTimer T("disassembleFunctions", "disassemble functions",
                      TimerGroupName, TimerGroupDesc, opts::TimeRewrite);
+
+  // Create annotation indices to allow lock-free execution
+  BC->MIB->getOrCreateAnnotationIndex("Size");
+  BC->MIB->getOrCreateAnnotationIndex("Locked");
+
   for (auto &BFI : BC->getBinaryFunctions()) {
     BinaryFunction &Function = BFI.second;
 
@@ -5048,6 +5105,15 @@ void RewriteInstance::updateOutputValues(const BOLTLinker &Linker) {
 
   for (BinaryFunction *Function : BC->getAllBinaryFunctions())
     Function->updateOutputValues(Linker);
+
+  if (opts::GolangPass != opts::GV_NONE) {
+    for (BinaryFunction *Function : BC->getAllBinaryFunctions()) {
+      if (Function->isGolang() && Function->getOutputSize()) {
+        assert((Function->getOutputAddress() & 0xfull) == 0 &&
+               "Unaligned function after golang pass!");
+      }
+    }
+  }
 }
 
 void RewriteInstance::updateSegmentInfo() {

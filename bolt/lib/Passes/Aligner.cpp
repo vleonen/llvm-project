@@ -12,6 +12,7 @@
 
 #include "bolt/Passes/Aligner.h"
 #include "bolt/Core/ParallelUtilities.h"
+#include "bolt/Utils/CommandLineOpts.h"
 
 #define DEBUG_TYPE "bolt-aligner"
 
@@ -153,7 +154,7 @@ Error AlignerPass::runOnFunctions(BinaryContext &BC) {
     BinaryContext::IndependentCodeEmitter Emitter =
         BC.createIndependentMCCodeEmitter();
 
-    if (opts::UseCompactAligner)
+    if (opts::UseCompactAligner && opts::GolangPass == opts::GV_NONE)
       alignCompact(BF, Emitter.MCE.get());
     else
       alignMaxBytes(BF);

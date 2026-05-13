@@ -278,6 +278,7 @@ static cl::opt<bool> ShortenInstructions("shorten-instructions",
                                          cl::desc("shorten instructions"),
                                          cl::init(true),
                                          cl::cat(BoltOptCategory));
+
 } // namespace opts
 
 namespace llvm {
@@ -437,7 +438,8 @@ Error BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
   Manager.registerPass(std::make_unique<RegReAssign>(PrintRegReAssign),
                        opts::RegReAssign);
 
-  Manager.registerPass(std::make_unique<Inliner>(PrintInline));
+  if (opts::GolangPass == opts::GV_NONE)
+    Manager.registerPass(std::make_unique<Inliner>(PrintInline));
 
   Manager.registerPass(std::make_unique<IdenticalCodeFolding>(PrintICF),
                        opts::ICF != IdenticalCodeFolding::ICFLevel::None);
@@ -501,7 +503,8 @@ Error BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
       std::make_unique<SimplifyConditionalTailCalls>(PrintSCTC),
       opts::SimplifyConditionalTailCalls);
 
-  Manager.registerPass(std::make_unique<Peepholes>(PrintPeepholes));
+  if (opts::GolangPass == opts::GV_NONE)
+    Manager.registerPass(std::make_unique<Peepholes>(PrintPeepholes));
 
   Manager.registerPass(std::make_unique<AlignerPass>());
 
@@ -546,8 +549,9 @@ Error BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
   // This pass turns tail calls into jumps which makes them invisible to
   // function reordering. It's unsafe to use any CFG or instruction analysis
   // after this point.
-  Manager.registerPass(
-      std::make_unique<InstructionLowering>(PrintAfterLowering));
+  if (opts::GolangPass == opts::GV_NONE)
+    Manager.registerPass(
+        std::make_unique<InstructionLowering>(PrintAfterLowering));
 
   // In non-relocation mode, mark functions that do not fit into their original
   // space as non-simple if we have to (e.g. for correct debug info update).

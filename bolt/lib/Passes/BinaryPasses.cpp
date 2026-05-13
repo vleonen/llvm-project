@@ -89,7 +89,7 @@ static cl::opt<bool> MinBranchClusters(
              "branches"),
     cl::Hidden, cl::cat(BoltOptCategory));
 
-static cl::list<Peepholes::PeepholeOpts> Peepholes(
+cl::list<Peepholes::PeepholeOpts> Peepholes(
     "peepholes", cl::CommaSeparated, cl::desc("enable peephole optimizations"),
     cl::value_desc("opt1,opt2,opt3,..."),
     cl::values(clEnumValN(Peepholes::PEEP_NONE, "none", "disable peepholes"),

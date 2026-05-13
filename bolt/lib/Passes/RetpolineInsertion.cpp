@@ -22,6 +22,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bolt/Passes/RetpolineInsertion.h"
+#include "bolt/Utils/CommandLineOpts.h"
 #include "llvm/MC/MCInstPrinter.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -268,7 +269,7 @@ IndirectBranchInfo::IndirectBranchInfo(MCInst &Inst, MCPlusBuilder &MIB) {
 }
 
 Error RetpolineInsertion::runOnFunctions(BinaryContext &BC) {
-  if (!opts::InsertRetpolines)
+  if (!opts::InsertRetpolines || opts::GolangPass != opts::GV_NONE)
     return Error::success();
 
   assert(BC.isX86() &&
