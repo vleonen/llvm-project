@@ -1381,7 +1381,8 @@ void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
             ? ArrayRef<std::pair<uint64_t, MCSymbol *>>(LabelIt->second)
             : ArrayRef<std::pair<uint64_t, MCSymbol *>>();
     Section.emitAsData(Streamer, Prefix + Section.getName(), Labels);
-    Section.clearRelocations();
+    if (!Section.hasDynamicRelocations())
+      Section.clearRelocations();
 
     if (opts::Rewrite && OrigType != ELF::SHT_PROGBITS &&
         OrigType != ELF::SHT_NOBITS)
