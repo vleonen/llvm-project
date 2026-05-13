@@ -17,7 +17,9 @@
 #include "bolt/Core/MCPlusBuilder.h"
 #include "bolt/Core/ParallelUtilities.h"
 #include "bolt/Core/Relocation.h"
+#include "bolt/Passes/BinaryPasses.h"
 #include "bolt/Passes/CacheMetrics.h"
+#include "bolt/Passes/Golang.h"
 #include "bolt/Passes/ReorderFunctions.h"
 #include "bolt/Profile/BoltAddressTranslation.h"
 #include "bolt/Profile/DataAggregator.h"
@@ -86,6 +88,17 @@ extern cl::opt<JumpTableSupportLevel> JumpTables;
 extern cl::list<std::string> ReorderData;
 extern cl::opt<bolt::ReorderFunctions::ReorderType> ReorderFunctions;
 extern cl::opt<bool> TimeBuild;
+extern cl::opt<bool> PreserveBlocksAlignment;
+extern cl::opt<bool> AlignBlocks;
+extern cl::opt<FrameOptimizationType> FrameOptimization;
+extern cl::opt<bool> KeepNops;
+extern cl::opt<bool> NoInline;
+extern cl::opt<bool> InstructionsLowering;
+extern cl::list<Peepholes::PeepholeOpts> Peepholes;
+extern cl::opt<bool> InsertRetpolines;
+extern cl::opt<bool> UseCompactAligner;
+
+// Golang support options
 
 cl::opt<bool> AllowStripped("allow-stripped",
                             cl::desc("allow processing of stripped binaries"),
@@ -2251,6 +2264,13 @@ void RewriteInstance::adjustCommandLineOptions() {
   if (opts::AlignText < opts::AlignFunctions)
     opts::AlignText = (unsigned)opts::AlignFunctions;
 
+  if (opts::GolangPass != opts::GV_NONE &&
+      (opts::AlignBlocks || opts::PreserveBlocksAlignment)) {
+    errs() << "BOLT-WARNING: Disabling block alignment\n";
+    opts::AlignBlocks = false;
+    opts::PreserveBlocksAlignment = false;
+  }
+
   if (BC->isX86() && opts::Lite.getNumOccurrences() == 0 && !opts::StrictMode &&
       !opts::UseOldText)
     opts::Lite = true;
@@ -2274,6 +2294,74 @@ void RewriteInstance::adjustCommandLineOptions() {
               "file processed by BOLT. Please remove -w option and use branch "
               "profile.\n";
     exit(1);
+  }
+
+  // Golang support adjustments
+  if (opts::GolangPass != opts::GV_NONE) {
+    opts::KeepNops = true;
+    opts::NoInline = true;
+    opts::InstructionsLowering = false;
+
+    bool UserSetNonNonePeephole =
+        opts::Peepholes.getNumOccurrences() > 0 &&
+        llvm::any_of(opts::Peepholes, [](Peepholes::PeepholeOpts Opt) {
+          return Opt != Peepholes::PEEP_NONE;
+        });
+
+    if (UserSetNonNonePeephole) {
+      errs()
+          << "BOLT-WARNING: peephole options are not compatible with -golang. "
+             "Disabling all peepholes.\n";
+      opts::Peepholes.clear();
+    }
+    opts::Peepholes.push_back(Peepholes::PEEP_NONE);
+
+    if (opts::FrameOptimization != FOP_NONE) {
+      errs() << "BOLT-WARNING: Golang does not support frame optimizations\n";
+      opts::FrameOptimization = FOP_NONE;
+    }
+
+    if (opts::Lite) {
+      errs() << "BOLT-WARNING: Lite mode is not compatible with -golang. "
+                "Disabling.\n";
+      opts::Lite = false;
+    }
+
+    if (opts::HotFunctionsAtEnd) {
+      errs() << "BOLT-WARNING: Golang does not support hot functions at end. "
+                "Disabling.\n";
+      opts::HotFunctionsAtEnd = false;
+    }
+
+    if (!opts::AlignFunctions.getNumOccurrences()) {
+      opts::AlignFunctions = 16u;
+      outs() << "BOLT-INFO: using alignment 16 for golang\n";
+    }
+
+    if (opts::AlignFunctions < 16u) {
+      outs() << formatv(
+          "BOLT-WARNING: golang requires at least 16 bytes of "
+          "alignment for functions, overriding provided {0} with 16\n",
+          (unsigned)opts::AlignFunctions);
+      opts::AlignFunctions = 16u;
+    }
+
+    if (!opts::AlignText.getNumOccurrences()) {
+      opts::AlignText = (unsigned)opts::AlignFunctions;
+      outs() << formatv("BOLT-INFO: using text alignment {0} for golang\n",
+                        (unsigned)opts::AlignText);
+    }
+
+    if (opts::UseCompactAligner) {
+      outs() << "BOLT-INFO: disabling use-compact-aligner for golang\n";
+      opts::UseCompactAligner = false;
+    }
+
+    if (opts::InsertRetpolines) {
+      errs() << "BOLT-WARNING: Retpoline pass is not compatible with -golang. "
+                "Disabling.\n";
+      opts::InsertRetpolines = false;
+    }
   }
 
   // Mirror the adjusted mode options into the target builder so that
@@ -3400,6 +3488,11 @@ void RewriteInstance::processProfileData() {
 void RewriteInstance::disassembleFunctions() {
   NamedRegionTimer T("disassembleFunctions", "disassemble functions",
                      TimerGroupName, TimerGroupDesc, opts::TimeRewrite);
+
+  // Create annotation indices to allow lock-free execution
+  BC->MIB->getOrCreateAnnotationIndex("Size");
+  BC->MIB->getOrCreateAnnotationIndex("Locked");
+
   for (auto &BFI : BC->getBinaryFunctions()) {
     BinaryFunction &Function = BFI.second;
 
@@ -4645,6 +4738,15 @@ void RewriteInstance::updateOutputValues(const BOLTLinker &Linker) {
 
   for (BinaryFunction *Function : BC->getAllBinaryFunctions())
     Function->updateOutputValues(Linker);
+
+  if (opts::GolangPass != opts::GV_NONE) {
+    for (BinaryFunction *Function : BC->getAllBinaryFunctions()) {
+      if (Function->isGolang() && Function->getOutputSize()) {
+        assert((Function->getOutputAddress() & 0xfull) == 0 &&
+               "Unaligned function after golang pass!");
+      }
+    }
+  }
 }
 
 void RewriteInstance::patchELFPHDRTable() {

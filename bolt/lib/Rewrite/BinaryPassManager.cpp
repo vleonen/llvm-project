@@ -262,6 +262,11 @@ static cl::opt<bool> CMOVConversionFlag("cmov-conversion",
                                         cl::ReallyHidden,
                                         cl::cat(BoltOptCategory));
 
+cl::opt<bool> InstructionsLowering("lower-instructions",
+                                   cl::desc("Instructions lowering pass"),
+                                   cl::init(true), cl::ZeroOrMore, cl::Hidden,
+                                   cl::cat(BoltCategory));
+
 } // namespace opts
 
 namespace llvm {
@@ -517,7 +522,8 @@ void BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
   // function reordering. It's unsafe to use any CFG or instruction analysis
   // after this point.
   Manager.registerPass(
-      std::make_unique<InstructionLowering>(PrintAfterLowering));
+      std::make_unique<InstructionLowering>(PrintAfterLowering),
+      opts::InstructionsLowering);
 
   // In non-relocation mode, mark functions that do not fit into their original
   // space as non-simple if we have to (e.g. for correct debug info update).

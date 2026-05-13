@@ -86,7 +86,7 @@ static cl::opt<unsigned> InlineSmallFunctionsBytes(
              "inlining purposes"),
     cl::init(4), cl::Hidden, cl::cat(BoltOptCategory));
 
-static cl::opt<bool> NoInline(
+cl::opt<bool> NoInline(
     "no-inline",
     cl::desc("disable all inlining (overrides other inlining options)"),
     cl::cat(BoltOptCategory));
