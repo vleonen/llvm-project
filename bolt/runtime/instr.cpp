@@ -105,6 +105,8 @@ extern bool __bolt_instr_use_pid;
 // TODO: We need better linking support to make that happen.
 extern void (*__bolt_ind_call_counter_func_pointer)();
 extern void (*__bolt_ind_tailcall_counter_func_pointer)();
+// Function pointer to __bolt_instr_fini
+extern void (*__bolt_trampoline_instr_fini_call)();
 // Function pointers to init/fini trampoline routines in the binary, so we can
 // resume regular execution of these functions that we hooked
 extern void __bolt_start_trampoline();
@@ -1630,11 +1632,13 @@ out:;
 
 extern "C" void __bolt_instr_indirect_call();
 extern "C" void __bolt_instr_indirect_tailcall();
+extern "C" void __bolt_instr_fini();
 
 /// Initialization code
 extern "C" void __attribute((force_align_arg_pointer)) __bolt_instr_setup() {
   __bolt_ind_call_counter_func_pointer = __bolt_instr_indirect_call;
   __bolt_ind_tailcall_counter_func_pointer = __bolt_instr_indirect_tailcall;
+  __bolt_trampoline_instr_fini_call = __bolt_instr_fini;
   TextBaseAddress = getTextBaseAddress();
 
   const uint64_t CountersStart =
