@@ -99,7 +99,21 @@ public:
   }
 
   bool isNoop(const MCInst &Inst) const override {
-    return X86::isNOP(Inst.getOpcode());
+    if (X86::isNOP(Inst.getOpcode()))
+      return true;
+    // Recognize the self-xchg nop forms. The disassembler canonicalizes
+    // encoded nops to NOOP, but size-accurate nop re-creation (createNoopSize,
+    // --keep-nops mode) uses XCHG16ar with RAX,RAX for the 2-byte form.
+    switch (Inst.getOpcode()) {
+    default:
+      return false;
+    case X86::XCHG16ar:
+    case X86::XCHG32ar:
+    case X86::XCHG64ar:
+      return MCPlus::getNumPrimeOperands(Inst) == 2 &&
+             Inst.getOperand(0).isReg() && Inst.getOperand(1).isReg() &&
+             Inst.getOperand(0).getReg() == Inst.getOperand(1).getReg();
+    }
   }
 
   unsigned getCondCode(const MCInst &Inst) const override {
@@ -2516,6 +2530,102 @@ public:
   void createReturn(MCInst &Inst) const override {
     Inst.setOpcode(X86::RET64);
     Inst.clear();
+  }
+
+  bool createNoopSize(MCInst &Inst, uint64_t Size) const override {
+    assert(Size <= 10 && "createNoopSize only supports 1-10 bytes");
+
+    Inst.clear();
+
+    switch (Size) {
+    case 1:
+      Inst.setOpcode(X86::NOOP);
+      break;
+    case 2:
+      // XCHG16ar with RAX,RAX encodes exactly as the 2-byte nop (66 90).
+      // isNoop() recognizes the self-xchg form so synthetic 2-byte nops
+      // stay NOPs for analyses (e.g. Linux kernel static keys with
+      // --keep-nops forced on).
+      Inst.setOpcode(X86::XCHG16ar);
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      break;
+    case 3:
+      Inst.setOpcode(X86::NOOPL);
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(1));
+      Inst.addOperand(MCOperand::createReg(0));
+      Inst.addOperand(MCOperand::createImm(0));
+      Inst.addOperand(MCOperand::createReg(0));
+      break;
+    case 4:
+      Inst.setOpcode(X86::NOOPL);
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(1));
+      Inst.addOperand(MCOperand::createReg(0));
+      Inst.addOperand(MCOperand::createImm(0));
+      Inst.addOperand(MCOperand::createReg(0));
+      Inst.setFlags(X86::IP_USE_DISP8);
+      break;
+    case 5:
+      Inst.setOpcode(X86::NOOPL);
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(1));
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(0));
+      Inst.addOperand(MCOperand::createReg(0));
+      Inst.setFlags(X86::IP_USE_DISP8);
+      break;
+    case 6:
+      Inst.setOpcode(X86::NOOPW);
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(1));
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(0));
+      Inst.addOperand(MCOperand::createReg(0));
+      Inst.setFlags(X86::IP_USE_DISP8);
+      break;
+    case 7:
+      Inst.setOpcode(X86::NOOPL);
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(1));
+      Inst.addOperand(MCOperand::createReg(0));
+      Inst.addOperand(MCOperand::createImm(0));
+      Inst.addOperand(MCOperand::createReg(0));
+      Inst.setFlags(X86::IP_USE_DISP32);
+      break;
+    case 8:
+      Inst.setOpcode(X86::NOOPL);
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(1));
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(0));
+      Inst.addOperand(MCOperand::createReg(0));
+      Inst.setFlags(X86::IP_USE_DISP32);
+      break;
+    case 9:
+      Inst.setOpcode(X86::NOOPW);
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(1));
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(0));
+      Inst.addOperand(MCOperand::createReg(0));
+      Inst.setFlags(X86::IP_USE_DISP32);
+      break;
+    case 10:
+      Inst.setOpcode(X86::NOOPW);
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(1));
+      Inst.addOperand(MCOperand::createReg(X86::RAX));
+      Inst.addOperand(MCOperand::createImm(0));
+      Inst.addOperand(MCOperand::createReg(X86::CS));
+      Inst.setFlags(X86::IP_USE_DISP32);
+      break;
+    default:
+      llvm_unreachable("createNoopSize only supports 1-10 bytes");
+    }
+
+    return true;
   }
 
   InstructionListType createInlineMemcpy(bool ReturnEnd) const override {

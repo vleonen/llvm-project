@@ -1831,6 +1831,12 @@ public:
     llvm_unreachable("not implemented");
   }
 
+  /// Create a multi-byte NOP instruction with specified size (1-10 bytes).
+  virtual bool createNoopSize(MCInst &Inst, uint64_t Size) const {
+    llvm_unreachable("not implemented");
+    return false;
+  }
+
   /// Store \p Target absolute address to \p RegName
   virtual InstructionListType materializeAddress(const MCSymbol *Target,
                                                  MCContext *Ctx,

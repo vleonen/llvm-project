@@ -61,6 +61,7 @@ extern cl::OptionCategory BoltOptCategory;
 
 extern cl::opt<bool> EnableBAT;
 extern cl::opt<bool> Instrument;
+extern cl::opt<bool> KeepNops;
 extern cl::opt<bool> StrictMode;
 extern cl::opt<bool> UpdateDebugSections;
 extern cl::opt<unsigned> Verbosity;
@@ -310,6 +311,13 @@ void BinaryFunction::markUnreachableBlocks() {
     // support removing unused jump tables yet (GH-issue20).
     for (const MCInst &Inst : *BB) {
       if (BC.MIB->getJumpTable(Inst)) {
+        Stack.push(BB);
+        BB->markValid(true);
+        break;
+      }
+      // NOP can be added for alignment, don't remove such BBs when the
+      // nops are being kept.
+      if (BC.MIB->isNoop(Inst) && opts::KeepNops) {
         Stack.push(BB);
         BB->markValid(true);
         break;
@@ -1618,7 +1626,30 @@ add_instruction:
       // NOTE: disassembly loses the correct size information for noops on x86.
       //       E.g. nopw 0x0(%rax,%rax,1) is 9 bytes, but re-encoded it's only
       //       5 bytes. Preserve the size info using annotations.
-      MIB->setSize(Instruction, Size);
+      if (opts::KeepNops && Size > 1) {
+        if (opts::Verbosity > 0)
+          outs() << "BOLT: createNoopSize: " << getOneName() << " Offset=0x"
+                 << Twine::utohexstr(Offset) << " Size=" << Size << "\n";
+        uint64_t RemainingSize = Size;
+        uint64_t CurrentOffset = Offset;
+        // For sizes > 10, split into multiple NOPs (10-byte + remainder)
+        while (RemainingSize > 10) {
+          MCInst NopInst;
+          BC.MIB->createNoopSize(NopInst, 10);
+          MIB->setSize(NopInst, 10);
+          addInstruction(CurrentOffset, std::move(NopInst));
+          RemainingSize -= 10;
+          CurrentOffset += 10;
+        }
+        Instruction.clear();
+        Instruction.setFlags(0);
+        BC.MIB->createNoopSize(Instruction, RemainingSize);
+        MIB->setSize(Instruction, RemainingSize);
+        addInstruction(CurrentOffset, std::move(Instruction));
+        continue;
+      } else {
+        MIB->setSize(Instruction, Size);
+      }
     }
 
     addInstruction(Offset, std::move(Instruction));
@@ -2428,7 +2459,14 @@ Error BinaryFunction::buildCFG(MCPlusBuilder::AllocatorIdTy AllocatorId) {
       // deletion.
       MIB->setOffset(Instr, static_cast<uint32_t>(Offset));
       // Annotate ordinary nops, so we can safely delete them if required.
-      MIB->addAnnotation(Instr, "NOP", static_cast<uint32_t>(1), AllocatorId);
+      // Annotate ordinary nops so ShortenInstructions can normalize their
+      // encoding while keeping them. Skip the annotation for Go functions
+      // with preserved nops: their exact sizes are part of the pcdata
+      // identity and must not be re-encoded. Non-golang binaries keep the
+      // upstream unconditional annotation (the --keep-nops mode relies on
+      // it for the multi-byte to 1-byte normalization).
+      if (opts::GolangPass == opts::GV_NONE || !PreserveNops)
+        MIB->addAnnotation(Instr, "NOP", static_cast<uint32_t>(1), AllocatorId);
     }
 
     if (!InsertBB) {
