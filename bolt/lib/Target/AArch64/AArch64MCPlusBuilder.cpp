@@ -2686,6 +2686,44 @@ public:
     return Instrs;
   }
 
+  InstructionListType
+  createGoExtendedStackCheck(uint32_t FrameSize,
+                             const MCSymbol *MoreStackTarget,
+                             MCContext *Ctx) const override {
+    InstructionListType Instrs;
+    Instrs.reserve(5);
+
+    Instrs.emplace_back(MCInstBuilder(AArch64::LDRXui)
+                            .addReg(AArch64::X17)
+                            .addReg(AArch64::X28)
+                            .addImm(2));
+
+    Instrs.emplace_back(MCInstBuilder(AArch64::SUBXri)
+                            .addReg(AArch64::X19)
+                            .addReg(AArch64::SP)
+                            .addImm(2)
+                            .addImm(12));
+
+    Instrs.emplace_back(MCInstBuilder(AArch64::SUBXri)
+                            .addReg(AArch64::X19)
+                            .addReg(AArch64::X19)
+                            .addImm(FrameSize)
+                            .addImm(0));
+
+    Instrs.emplace_back(MCInstBuilder(AArch64::SUBSXrs)
+                            .addReg(AArch64::XZR)
+                            .addReg(AArch64::X19)
+                            .addReg(AArch64::X17)
+                            .addImm(0));
+
+    Instrs.emplace_back(
+        MCInstBuilder(AArch64::Bcc)
+            .addImm(AArch64CC::LS)
+            .addExpr(MCSymbolRefExpr::create(MoreStackTarget, *Ctx)));
+
+    return Instrs;
+  }
+
   std::vector<MCInst> createSymbolTrampoline(const MCSymbol *TgtSym,
                                              MCContext *Ctx) override {
     std::vector<MCInst> Insts;

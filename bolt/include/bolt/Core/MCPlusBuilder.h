@@ -2363,6 +2363,14 @@ public:
     return InstructionListType();
   }
 
+  virtual InstructionListType
+  createGoExtendedStackCheck(uint32_t FrameSize,
+                             const MCSymbol *MoreStackTarget,
+                             MCContext *Ctx) const {
+    llvm_unreachable("not implemented");
+    return InstructionListType();
+  }
+
   virtual InstructionListType createInstrumentedIndCallHandlerExitBB() const {
     llvm_unreachable("not implemented");
     return InstructionListType();
@@ -2419,6 +2427,14 @@ public:
 
   virtual InstructionListType createSymbolTrampoline(const MCSymbol *TgtSym,
                                                      MCContext *Ctx) {
+    llvm_unreachable("not implemented");
+    return InstructionListType();
+  }
+
+  /// Create a minimal function body consisting of a single return
+  /// instruction (used for the Go instrumentation fini trampoline).
+  virtual InstructionListType
+  createDummyReturnFunction(MCContext *Ctx) const {
     llvm_unreachable("not implemented");
     return InstructionListType();
   }

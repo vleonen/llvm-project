@@ -330,11 +330,21 @@ void Instrumentation::instrumentIndirectTarget(BinaryBasicBlock &BB,
                                                BinaryBasicBlock::iterator &Iter,
                                                BinaryFunction &FromFunction,
                                                uint32_t From) {
+  BinaryContext &BC = FromFunction.getBinaryContext();
+
+  if (BC.isAArch64() && FromFunction.isGolang()) {
+    if (!GolangPass::hasMorestackBlock(FromFunction)) {
+      LLVM_DEBUG(dbgs() << "BOLT-INSTRUMENTER: Skipping indirect call in "
+                        << FromFunction
+                        << " - Go function without morestack\n");
+      return;
+    }
+  }
+
   auto L = FromFunction.getBinaryContext().scopeLock();
   const size_t IndCallSiteID = Summary->IndCallDescriptions.size();
   createIndCallDescription(FromFunction, From);
 
-  BinaryContext &BC = FromFunction.getBinaryContext();
   bool IsTailCall = BC.MIB->isTailCall(*Iter);
   InstructionListType CounterInstrs = BC.MIB->createInstrumentedIndirectCall(
       std::move(*Iter),
@@ -497,6 +507,58 @@ void Instrumentation::instrumentFunction(BinaryFunction &Function,
           InvokeBlocks.insert(&BB);
         if (!BC.MIB->isTailCall(Inst))
           IsLeafFunction = false;
+      }
+    }
+  }
+
+  LLVM_DEBUG(dbgs() << "BOLT-INSTRUMENTER: Checking function " << Function
+                    << " isAArch64=" << BC.isAArch64()
+                    << " isGolang=" << Function.isGolang() << "\n");
+
+  // For Go AArch64/x86_64 functions with indirect calls, insert extended stack
+  // check before the existing Go prologue stack check
+  if (!GolangPass::shouldSkipExtendStack(BC, Function)) {
+    LLVM_DEBUG(dbgs() << "BOLT-INSTRUMENTER: Function " << Function
+                      << " is Go user function, checking morestack block...\n");
+    if (GolangPass::hasMorestackBlock(Function) &&
+        GolangPass::hasIndirectCall(Function)) {
+      LLVM_DEBUG(dbgs() << "BOLT-INSTRUMENTER: Function " << Function
+                        << " has morestack block and indirect calls\n");
+      std::optional<uint32_t> FrameSize =
+          GolangPass::computeGoFunctionFrameSize(Function);
+      if (FrameSize.has_value() && *FrameSize <= 4095) {
+        LLVM_DEBUG(dbgs() << "BOLT-INSTRUMENTER: Frame size = " << *FrameSize
+                          << "\n");
+        if (const MCSymbol *MorestackLabel =
+                GolangPass::findMorestackBranchTarget(Function)) {
+          LLVM_DEBUG(dbgs() << "BOLT-INSTRUMENTER: Morestack target = "
+                            << MorestackLabel->getName() << "\n");
+          InstructionListType StackCheckInstrs =
+              BC.MIB->createGoExtendedStackCheck(*FrameSize, MorestackLabel,
+                                                 BC.Ctx.get());
+          if (!StackCheckInstrs.empty()) {
+            LLVM_DEBUG(dbgs() << "BOLT-INSTRUMENTER: Creating "
+                              << StackCheckInstrs.size() << " instructions for "
+                              << Function.getPrintName() << "\n");
+            LLVM_DEBUG(for (size_t i = 0; i < StackCheckInstrs.size(); ++i) {
+              dbgs() << "  Inst " << i
+                     << ": opcode=" << StackCheckInstrs[i].getOpcode()
+                     << " numOperands=" << StackCheckInstrs[i].getNumOperands()
+                     << "\n";
+            });
+            BinaryBasicBlock &EntryBB = **Function.getLayout().block_begin();
+            auto InsertPos = EntryBB.begin();
+            GolangPass::annotateInstrumentationInstructions(StackCheckInstrs,
+                                                            EntryBB, InsertPos);
+            for (MCInst &Inst : StackCheckInstrs) {
+              InsertPos = EntryBB.insertInstruction(InsertPos, Inst);
+              ++InsertPos;
+            }
+            LLVM_DEBUG(dbgs() << "BOLT-INSTRUMENTER: Inserted extended stack "
+                              << "check for " << Function
+                              << " (frame size: " << *FrameSize << ")\n");
+          }
+        }
       }
     }
   }
