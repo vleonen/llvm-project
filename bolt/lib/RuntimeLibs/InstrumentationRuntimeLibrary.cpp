@@ -14,6 +14,7 @@
 #include "bolt/Core/BinaryFunction.h"
 #include "bolt/Core/JumpTable.h"
 #include "bolt/Core/Linker.h"
+#include "bolt/Passes/Golang.h"
 #include "bolt/Utils/CommandLineOpts.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/Support/Alignment.h"
@@ -184,6 +185,13 @@ void InstrumentationRuntimeLibrary::emitBinary(BinaryContext &BC,
   emitString("__bolt_instr_filename", opts::InstrumentationFilename);
   emitString("__bolt_instr_binpath", opts::InstrumentationBinpath);
   emitIntValue("__bolt_instr_use_pid", !!opts::InstrumentationFileAppendPID, 1);
+  // The fini-call trampoline pointer: consumed by the Golang post pass
+  // (Go binaries have no .fini_array). Emitted for every instrumented
+  // binary - the runtime library assigns it unconditionally, and gating
+  // it would require a GOT-style indirection in the runtime that its
+  // JITLink emission does not support.
+  emitValue(BC.Ctx->getOrCreateSymbol("__bolt_trampoline_instr_fini_call"),
+            nullptr);
 
   if (BC.isMachO()) {
     MCSection *TablesSection = BC.Ctx->getMachOSection(
