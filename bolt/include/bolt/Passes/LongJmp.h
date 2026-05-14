@@ -126,6 +126,12 @@ class LongJmpPass : public BinaryFunctionPass {
   /// Helper to identify whether \p Inst is branching to a stub
   bool usesStub(const BinaryFunction &Func, const MCInst &Inst) const;
 
+  /// Helper function to return delta offset between \p DotAddress and target
+  uint64_t getTargetOffset(const BinaryContext &BC, uint64_t InstSize,
+                           uint64_t TargetAddress, uint64_t DotAddress) const;
+  uint64_t getTargetOffset(const BinaryFunction &Func, uint64_t InstSize,
+                           const MCSymbol *TgtSym, uint64_t DotAddress) const;
+
   /// True if Inst is a branch that is out of range
   bool needsStub(const BinaryBasicBlock &BB, const MCInst &Inst,
                  uint64_t DotAddress) const;
@@ -137,8 +143,14 @@ class LongJmpPass : public BinaryFunctionPass {
   uint64_t getSymbolAddress(const BinaryContext &BC, const MCSymbol *Target,
                             const BinaryBasicBlock *TgtBB) const;
 
+  enum RelaxRet {
+    NotModified = 0,  // No changes were made
+    InstrRelaxed = 1, // Instruction relaxations were made
+    StubsInserted = 2 // New stubs were inserted in function
+  };
+
   /// Relax function by adding necessary stubs or relaxing existing stubs
-  bool relax(BinaryFunction &BF);
+  RelaxRet relax(BinaryFunction &BF);
 
 public:
   /// BinaryPass public interface

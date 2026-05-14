@@ -3115,36 +3115,6 @@ public:
     }
   }
 
-  unsigned getLongBranchOpcode(unsigned Opcode) const {
-    switch (Opcode) {
-    default:
-      return Opcode;
-    case X86::JMP_1:
-      return X86::JMP_4;
-    case X86::JMP_2:
-      return X86::JMP_4;
-    case X86::JCC_1:
-      return X86::JCC_4;
-    case X86::JCC_2:
-      return X86::JCC_4;
-    }
-  }
-
-  bool relaxInstruction(MCInst &Inst) const override {
-    unsigned OldOpcode = Inst.getOpcode();
-    unsigned NewOpcode = OldOpcode;
-
-    if (isBranch(Inst) || isTailCall(Inst)) {
-      NewOpcode = getLongBranchOpcode(OldOpcode);
-    }
-
-    if (NewOpcode == OldOpcode)
-      return false;
-
-    Inst.setOpcode(NewOpcode);
-    return true;
-  }
-
   MCPhysReg getIntArgRegister(unsigned ArgNo) const override {
     // FIXME: this should depend on the calling convention.
     switch (ArgNo) {

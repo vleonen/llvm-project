@@ -1105,11 +1105,6 @@ public:
     return true;
   }
 
-  bool relaxInstruction(MCInst &Inst) const override {
-    (void)Inst;
-    return false;
-  }
-
   bool lowerTailCall(MCInst &Inst) override {
     removeAnnotation(Inst, MCPlus::MCAnnotation::kTailCall);
     if (getConditionalTailCall(Inst))
