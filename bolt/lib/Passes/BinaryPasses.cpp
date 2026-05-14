@@ -1244,9 +1244,17 @@ void AssignSections::runOnFunctions(BinaryContext &BC) {
   if (!BC.HasRelocations)
     return;
 
-  const bool UseColdSection =
-      BC.NumProfiledFuncs > 0 ||
-      opts::ReorderFunctions == ReorderFunctions::RT_USER;
+  bool UseColdSection = BC.NumProfiledFuncs > 0 ||
+                        opts::ReorderFunctions == ReorderFunctions::RT_USER;
+
+  // With RT_NONE reordering we won't assign indexes for BF. Go binaries
+  // must additionally keep every function in the main .text section
+  // (the golang passes index all functions and the pclntab regeneration
+  // expects a contiguous layout) - golang mode only.
+  if (opts::ReorderFunctions == ReorderFunctions::RT_NONE ||
+      opts::GolangPass != opts::GV_NONE)
+    UseColdSection = false;
+
   for (auto &BFI : BC.getBinaryFunctions()) {
     BinaryFunction &Function = BFI.second;
     if (opts::isHotTextMover(Function)) {
