@@ -1830,6 +1830,147 @@ void GolangPass::annotateInstrumentationInstructions(
   }
 }
 
+bool GolangPass::hasMorestackBlock(const BinaryFunction &Function) {
+  const BinaryContext &BC = Function.getBinaryContext();
+
+  for (const BinaryBasicBlock &BB : Function) {
+    for (const MCInst &Inst : BB) {
+      if (BC.MIB->isCall(Inst)) {
+        if (const MCSymbol *Target = BC.MIB->getTargetSymbol(Inst)) {
+          StringRef TargetName = Target->getName();
+          if (TargetName.contains("runtime.morestack_noctxt.abi0")) {
+            LLVM_DEBUG(dbgs() << "BOLT-GOLANG: Function " << Function
+                              << " has morestack block (target: " << TargetName
+                              << ")\n");
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+bool GolangPass::hasIndirectCall(const BinaryFunction &Function) {
+  const BinaryContext &BC = Function.getBinaryContext();
+  for (const BinaryBasicBlock &BB : Function) {
+    for (const MCInst &Inst : BB) {
+      if (BC.MIB->isIndirectCall(Inst))
+        return true;
+    }
+  }
+  return false;
+}
+
+std::optional<uint32_t>
+GolangPass::computeGoFunctionFrameSize(const BinaryFunction &Function) {
+  const BinaryContext &BC = Function.getBinaryContext();
+
+  if (Function.empty())
+    return std::nullopt;
+
+  const BinaryBasicBlock &EntryBB = **Function.getLayout().block_begin();
+
+  LLVM_DEBUG(dbgs() << "BOLT-GOLANG: computeGoFunctionFrameSize for "
+                    << Function << " (EntryBB size=" << EntryBB.size()
+                    << ")\n");
+
+  const BinaryBasicBlock *FrameSetupBB = EntryBB.getFallthrough();
+  if (!FrameSetupBB) {
+    LLVM_DEBUG(dbgs() << "BOLT-GOLANG:   No fallthrough block\n");
+    return std::nullopt;
+  }
+
+  LLVM_DEBUG(dbgs() << "BOLT-GOLANG:   Looking at fallthrough BB (size="
+                    << FrameSetupBB->size() << ")\n");
+
+  int MaxAdjustment = 0;
+  for (const MCInst &Inst : *FrameSetupBB) {
+    if (BC.MIB->isCall(Inst))
+      break;
+
+    if (BC.MIB->isStackAdjustment(Inst)) {
+      int Adjustment = BC.MIB->getStackAdjustment(Inst);
+      int AbsAdjustment = std::abs(Adjustment);
+      LLVM_DEBUG(dbgs() << "BOLT-GOLANG:   Found stack adjustment: "
+                        << Adjustment << " (abs=" << AbsAdjustment << ")\n");
+      if (AbsAdjustment > MaxAdjustment) {
+        MaxAdjustment = AbsAdjustment;
+      }
+    }
+  }
+
+  if (MaxAdjustment > 0) {
+    LLVM_DEBUG(dbgs() << "BOLT-GOLANG:   Frame size = " << MaxAdjustment
+                      << "\n");
+    return static_cast<uint32_t>(MaxAdjustment);
+  }
+
+  LLVM_DEBUG(dbgs() << "BOLT-GOLANG:   No frame size found\n");
+  return std::nullopt;
+}
+
+const MCSymbol *
+GolangPass::findMorestackBranchTarget(const BinaryFunction &Function) {
+  const BinaryContext &BC = Function.getBinaryContext();
+
+  LLVM_DEBUG(dbgs() << "BOLT-GOLANG: findMorestackBranchTarget for " << Function
+                    << "\n");
+
+  for (const BinaryBasicBlock &BB : Function) {
+    for (const MCInst &Inst : BB) {
+      if (BC.MIB->isCall(Inst)) {
+        if (const MCSymbol *Target = BC.MIB->getTargetSymbol(Inst)) {
+          StringRef TargetName = Target->getName();
+          if (TargetName.contains("runtime.morestack_noctxt.abi0")) {
+            LLVM_DEBUG(dbgs()
+                       << "BOLT-GOLANG:   Found morestack call, BB label: "
+                       << BB.getLabel()->getName() << "\n");
+            return BB.getLabel();
+          }
+        }
+      }
+    }
+  }
+
+  LLVM_DEBUG(dbgs() << "BOLT-GOLANG:   Morestack BB not found\n");
+
+  return nullptr;
+}
+
+// Determine whether to skip extended stack check insertion for a function.
+// Returns true if the function should be skipped (no extended stack check
+// inserted).
+//
+// Extended stack checks are inserted for Go user functions on supported
+// architectures (AArch64 and x86_64) to handle indirect calls that may require
+// more stack space than the standard Go prologue check can detect.
+//
+// Functions that are skipped:
+// - Non-Go functions
+// - Non-AArch64/x86_64 architectures
+// - Functions in the "runtime." namespace (runtime handles its own stack
+// checking)
+bool GolangPass::shouldSkipExtendStack(const BinaryContext &BC,
+                                       const BinaryFunction &Function) {
+  // Skip non-Go functions
+  if (!Function.isGolang())
+    return true;
+
+  // Only support AArch64 (original implementation) and x86_64 (this port)
+  // Note: AArch64 uses X28 register for g pointer, x86_64 uses R14
+  if (!BC.isAArch64() && !BC.isX86())
+    return true;
+
+  // Skip runtime functions - they have their own stack management
+  for (StringRef Name : Function.getNames()) {
+    if (Name.contains("runtime."))
+      return true;
+  }
+
+  return false;
+}
+
 // Validate version format (goX.Y.Z)
 static bool validateVersionFormat(StringRef VersionStr) {
   if (VersionStr.empty())

@@ -15,6 +15,7 @@
 
 #include "BinaryPasses.h"
 #include "bolt/Rewrite/MetadataRewriter.h"
+#include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/CommandLine.h"
 
 #include <atomic>
@@ -160,6 +161,19 @@ public:
   uint8_t getPsize() const {
     return GolangBinaryInfo::getInstance().getPsize();
   }
+
+  static bool hasMorestackBlock(const BinaryFunction &Function);
+
+  static bool hasIndirectCall(const BinaryFunction &Function);
+
+  static std::optional<uint32_t>
+  computeGoFunctionFrameSize(const BinaryFunction &Function);
+
+  static const MCSymbol *
+  findMorestackBranchTarget(const BinaryFunction &Function);
+
+  static bool shouldSkipExtendStack(const BinaryContext &BC,
+                                    const BinaryFunction &Function);
 
   class Pclntab *getPclntab() {
     return GolangBinaryInfo::getInstance().getPclntab();

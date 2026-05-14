@@ -3595,6 +3595,101 @@ public:
     return Insts;
   }
 
+  InstructionListType
+  createGoExtendedStackCheck(uint32_t FrameSize,
+                             const MCSymbol *MoreStackTarget,
+                             MCContext *Ctx) const override {
+    // This function generates a 5-instruction sequence for Go stack overflow
+    // checking on x86_64. This is the x86_64 port of the AArch64
+    // implementation.
+    //
+    // x86_64 Go Stack Layout (matching Go runtime convention):
+    // - R14 register contains the g pointer (current goroutine)
+    // - g.stackguard0 is at offset +0x10 (16 bytes) from g pointer
+    // - Threshold for stack check is 16384 bytes below current SP
+    //
+    // Instruction sequence:
+    //   movq 0x10(%r14), %r13    // Load g.stackguard0 into r13
+    //   leaq -0x4000(%rsp), %r12 // Calculate check threshold (16384 below
+    //                             // current rsp)
+    //   subq $FrameSize, %r12    // Subtract function frame size from
+    //                             // threshold
+    //   cmpq %r12, %r13          // Compare threshold with stackguard
+    //   jbe morestack            // Branch to morestack BB if
+    //                             // threshold <= stackguard (unsigned)
+    //
+    // The unsigned comparison (JBE - "jump if below or equal") is correct
+    // because:
+    // - stackguard0 contains an address (or the huge unsigned stackPreempt
+    //   sentinel for preemption requests)
+    // - We want to branch when threshold (SP - 16384 - frame) <= stackguard0
+    // - This means we need more stack (no room left), and the preemption
+    //   sentinel trips the same path, as in the Go prologue's JLS
+    //
+    // Register usage (R12/R13 are permanent scratch registers in the Go
+    // internal ABI - R10/R11 are argument registers and must not be
+    // clobbered before register arguments are consumed):
+    // - R14 (callee-saved): g pointer - preserved by Go runtime
+    // - R12 (permanent scratch per Go ABI): holds computed threshold
+    // - R13 (permanent scratch per Go ABI): holds stackguard0 value
+    //
+    // This approach is conservative - it will trigger morestack more often
+    // than strictly necessary when R10 and R11 are close, but this is safe.
+
+    InstructionListType Instrs;
+    Instrs.reserve(5);
+
+    // Load g.stackguard0 (at offset +16 from g pointer in R14)
+    // This is a 64-bit load with no scale, index, or base displacement
+    Instrs.emplace_back(
+        MCInstBuilder(X86::MOV64rm)
+            .addReg(X86::R13)
+            .addReg(X86::R14)
+            .addImm(1)   // scale = 1
+            .addReg(0)   // index = no index
+            .addImm(16)  // displacement = 16 (sizeof g.stackguard0)
+            .addReg(0)); // base = R14 (g pointer)
+
+    // Calculate threshold = SP - 16384 (0x4000)
+    // LEA64r computes effective address with SP as base
+    Instrs.emplace_back(
+        MCInstBuilder(X86::LEA64r)
+            .addReg(X86::R12)
+            .addReg(X86::RSP)
+            .addImm(1)      // scale = 1
+            .addReg(0)      // index = no index
+            .addImm(-16384) // displacement = -16384 (threshold offset)
+            .addReg(0));    // base = RSP
+
+    // Subtract function frame size from threshold
+    // This accounts for the space the function will use
+    Instrs.emplace_back(MCInstBuilder(X86::SUB64ri32)
+                            .addReg(X86::R12)
+                            .addReg(X86::R12)
+                            .addImm(FrameSize));
+
+    // Compare threshold with stackguard
+    // After this, flags are set for unsigned comparison
+    Instrs.emplace_back(
+        MCInstBuilder(X86::CMP64rr).addReg(X86::R12).addReg(X86::R13));
+
+    // Branch to the morestack BB when threshold <= stackguard (unsigned),
+    // mirroring the Go prologue's "CMPQ SP, 16(R14); JLS morestack" (JLS =
+    // unsigned below-or-equal) and the AArch64 counterpart's B.LS. The
+    // comparison must be unsigned: Go encodes preemption requests in
+    // stackguard0 as the sentinel stackPreempt (0xfffffade0) - a huge
+    // unsigned value - precisely so the check trips morestack and the
+    // preemption is serviced there; a signed branch would never trip on
+    // the sentinel.
+    Instrs.emplace_back(
+        MCInstBuilder(X86::JCC_1)
+            .addExpr(MCSymbolRefExpr::create(MoreStackTarget,
+                                             MCSymbolRefExpr::VK_None, *Ctx))
+            .addImm(X86::COND_BE));
+
+    return Instrs;
+  }
+
   BlocksVectorTy indirectCallPromotion(
       const MCInst &CallInst,
       const std::vector<std::pair<MCSymbol *, uint64_t>> &Targets,

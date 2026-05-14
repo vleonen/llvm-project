@@ -2134,6 +2134,14 @@ public:
     return InstructionListType();
   }
 
+  virtual InstructionListType
+  createGoExtendedStackCheck(uint32_t FrameSize,
+                             const MCSymbol *MoreStackTarget,
+                             MCContext *Ctx) const {
+    llvm_unreachable("not implemented");
+    return InstructionListType();
+  }
+
   virtual InstructionListType createInstrumentedIndCallHandlerExitBB() const {
     llvm_unreachable("not implemented");
     return InstructionListType();
