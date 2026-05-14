@@ -1677,14 +1677,15 @@ public:
     return false;
   }
 
-  /// Replace instruction with relaxed version of it
-  virtual bool relaxInstruction(MCInst &Inst) const {
+  /// Lower a tail call instruction \p Inst if required by target.
+  virtual bool lowerTailCall(MCInst &Inst) {
     llvm_unreachable("not implemented");
     return false;
   }
 
-  /// Lower a tail call instruction \p Inst if required by target.
-  virtual bool lowerTailCall(MCInst &Inst) {
+  /// Attempt to relax an instruction in place (e.g. convert it to a form with
+  /// greater range). Returns true if the instruction was modified.
+  virtual bool relaxInstruction(MCInst &Inst) const {
     llvm_unreachable("not implemented");
     return false;
   }
