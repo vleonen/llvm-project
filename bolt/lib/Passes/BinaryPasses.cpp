@@ -1879,5 +1879,25 @@ void RemoveNops::runOnFunctions(BinaryContext &BC) {
       SkipFunc, "RemoveNops");
 }
 
+void StackOpsTestPass::runOnFunctions(BinaryContext &BC) {
+  for (auto &It : BC.getBinaryFunctions()) {
+    BinaryFunction &BF = It.second;
+
+    // Filter by --print-only if specified
+    if (!shouldPrint(BF))
+      continue;
+
+    for (BinaryBasicBlock &BB : BF) {
+      for (MCInst &Instruction : BB) {
+        if (BC.MIB->isStackAdjustment(Instruction)) {
+          auto V = BC.MIB->getStackAdjustment(Instruction);
+          Instruction.dump();
+          outs() << "BOLT-INFO: StackOpsTestPass: V=" << V << "\n";
+        }
+      }
+    }
+  }
+}
+
 } // namespace bolt
 } // namespace llvm

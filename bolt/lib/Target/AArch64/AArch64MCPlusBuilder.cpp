@@ -23,7 +23,9 @@
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Errc.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/ErrorOr.h"
 
 #define DEBUG_TYPE "mcplus"
 
@@ -1765,6 +1767,353 @@ public:
   }
 
   uint16_t getMinFunctionAlignment() const override { return 4; }
+
+  /// Identify stack adjustment instructions -- those that change the stack
+  /// pointer by adding or subtracting an immediate.
+  bool isStackAdjustment(const MCInst &Inst) const override {
+    switch (Inst.getOpcode()) {
+    default:
+      return false;
+    // Direct SP modifications with immediate values
+    case AArch64::SUBXri:
+    case AArch64::SUBWri:
+    case AArch64::ADDXri:
+    case AArch64::ADDWri:
+      break;
+    // Store pair with pre/post-indexing (deals with stack allocation)
+    case AArch64::STPXpre:
+    case AArch64::STPXpost:
+    case AArch64::STPWpre:
+    case AArch64::STPWpost:
+      break;
+    // Load pair with pre/post-indexing (deals with stack deallocation)
+    case AArch64::LDPXpre:
+    case AArch64::LDPXpost:
+    case AArch64::LDPWpre:
+    case AArch64::LDPWpost:
+      break;
+    // Single register STR/LDR with pre/post-decrement
+    case AArch64::STRXpre:
+    case AArch64::STRXpost:
+    case AArch64::STRWpre:
+    case AArch64::STRWpost:
+    case AArch64::LDRXpre:
+    case AArch64::LDRXpost:
+    case AArch64::LDRWpre:
+    case AArch64::LDRWpost:
+      break;
+    }
+
+    // Check if any definition operand is the SP register (X31)
+    return any_of(defOperands(Inst), [](const MCOperand &Op) {
+      return Op.isReg() && Op.getReg() == AArch64::SP;
+    });
+  }
+
+  /// Get the stack adjustment amount for a stack adjustment instruction.
+  /// This function evaluates stack offset expressions by calculating the
+  /// new stack pointer value after executing the instruction.
+  bool
+  evaluateStackOffsetExpr(const MCInst &Inst, int64_t &Output,
+                          std::pair<MCPhysReg, int64_t> Input1,
+                          std::pair<MCPhysReg, int64_t> Input2) const override {
+    auto getOperandVal = [&](MCPhysReg Reg) -> ErrorOr<int64_t> {
+      if (Reg == Input1.first)
+        return Input1.second;
+      if (Reg == Input2.first)
+        return Input2.second;
+      return std::make_error_code(std::errc::result_out_of_range);
+    };
+
+    switch (Inst.getOpcode()) {
+    default:
+      return false;
+
+    // Direct SP operations - operand 0 = dest, operand 1 = src, operand 2 = imm
+    case AArch64::SUBXri:
+    case AArch64::SUBWri:
+      if (Inst.getNumOperands() < 3)
+        return false;
+      if (!Inst.getOperand(2).isImm())
+        return false;
+      if (!Inst.getOperand(1).isReg())
+        return false;
+      if (ErrorOr<int64_t> InputVal =
+              getOperandVal(Inst.getOperand(1).getReg()))
+        Output = *InputVal - Inst.getOperand(2).getImm();
+      else
+        return false;
+      break;
+
+    case AArch64::ADDXri:
+    case AArch64::ADDWri:
+      if (Inst.getNumOperands() < 3)
+        return false;
+      if (!Inst.getOperand(2).isImm())
+        return false;
+      if (!Inst.getOperand(1).isReg())
+        return false;
+      if (ErrorOr<int64_t> InputVal =
+              getOperandVal(Inst.getOperand(1).getReg()))
+        Output = *InputVal + Inst.getOperand(2).getImm();
+      else
+        return false;
+      break;
+
+    // STR single register - operand 1 = base, operand 2 = immediate offset
+    case AArch64::STRXpre:
+    case AArch64::STRXpost:
+    case AArch64::STRWpre:
+    case AArch64::STRWpost:
+      // Operands: Rt, Rn(base), Rn-wb, imm (unscaled bytes).
+      if (Inst.getNumOperands() < 4)
+        return false;
+      if (!Inst.getOperand(3).isImm())
+        return false;
+      if (!Inst.getOperand(1).isReg())
+        return false;
+      if (ErrorOr<int64_t> InputVal =
+              getOperandVal(Inst.getOperand(1).getReg()))
+        Output = *InputVal + Inst.getOperand(3).getImm();
+      else
+        return false;
+      break;
+
+    // LDR single register - operand 1 = base, operand 3 = immediate offset
+    case AArch64::LDRXpre:
+    case AArch64::LDRXpost:
+    case AArch64::LDRWpre:
+    case AArch64::LDRWpost:
+      // Operands: Rt, Rn(base), Rn-wb, imm (unscaled bytes).
+      if (Inst.getNumOperands() < 4)
+        return false;
+      if (!Inst.getOperand(3).isImm())
+        return false;
+      if (!Inst.getOperand(1).isReg())
+        return false;
+      if (ErrorOr<int64_t> InputVal =
+              getOperandVal(Inst.getOperand(1).getReg()))
+        Output = *InputVal - Inst.getOperand(3).getImm();
+      else
+        return false;
+      break;
+
+    // STP register pairs - operand 2 = base, operand 4 = scaled immediate
+    // (X pairs scale 8, W pairs scale 4)
+    case AArch64::STPXpre:
+    case AArch64::STPXpost:
+      if (Inst.getNumOperands() < 5)
+        return false;
+      if (!Inst.getOperand(4).isImm())
+        return false;
+      if (!Inst.getOperand(2).isReg())
+        return false;
+      if (ErrorOr<int64_t> InputVal =
+              getOperandVal(Inst.getOperand(2).getReg()))
+        Output = *InputVal + Inst.getOperand(4).getImm() * 8;
+      else
+        return false;
+      break;
+    case AArch64::STPWpre:
+    case AArch64::STPWpost:
+      if (Inst.getNumOperands() < 5)
+        return false;
+      if (!Inst.getOperand(4).isImm())
+        return false;
+      if (!Inst.getOperand(2).isReg())
+        return false;
+      if (ErrorOr<int64_t> InputVal =
+              getOperandVal(Inst.getOperand(2).getReg()))
+        Output = *InputVal + Inst.getOperand(4).getImm() * 4;
+      else
+        return false;
+      break;
+
+    // LDP register pairs - operand 2 = base, operand 4 = scaled immediate
+    // (X pairs scale 8, W pairs scale 4)
+    case AArch64::LDPXpre:
+    case AArch64::LDPXpost:
+      if (Inst.getNumOperands() < 5)
+        return false;
+      if (!Inst.getOperand(4).isImm())
+        return false;
+      if (!Inst.getOperand(2).isReg())
+        return false;
+      if (ErrorOr<int64_t> InputVal =
+              getOperandVal(Inst.getOperand(2).getReg()))
+        Output = *InputVal - Inst.getOperand(4).getImm() * 8;
+      else
+        return false;
+      break;
+    case AArch64::LDPWpre:
+    case AArch64::LDPWpost:
+      if (Inst.getNumOperands() < 5)
+        return false;
+      if (!Inst.getOperand(4).isImm())
+        return false;
+      if (!Inst.getOperand(2).isReg())
+        return false;
+      if (ErrorOr<int64_t> InputVal =
+              getOperandVal(Inst.getOperand(2).getReg()))
+        Output = *InputVal - Inst.getOperand(4).getImm() * 4;
+      else
+        return false;
+      break;
+    }
+    return true;
+  }
+
+  /// Get the stack pointer register for AArch64.
+  MCPhysReg getStackPointer() const override { return AArch64::SP; }
+
+protected:
+  /// Helper function to analyze single register store/load with
+  /// pre/post-decrement.
+  int getSingleRegisterAdjustment(const MCInst &Inst) const {
+    // AArch64 STR/LDR instructions have 4 operands:
+    // reg, base_reg, ?, immediate
+    // Stack adjustment value is at operand index 3
+    if (Inst.getNumOperands() < 4) {
+      // Not enough operands, return 0
+      return 0;
+    }
+
+    if (!Inst.getOperand(3).isImm()) {
+      // Not an immediate operand, return 0
+      return 0;
+    }
+
+    int64_t Offset = Inst.getOperand(3).getImm();
+
+    switch (Inst.getOpcode()) {
+    case AArch64::STRXpre:
+    case AArch64::STRXpost:
+    case AArch64::STRWpre:
+    case AArch64::STRWpost:
+      // Store operations increase stack pointer allocation
+      // Value is already in bytes, no scaling needed
+      // Take absolute value since immediate is negative in assembly
+      return static_cast<int>(std::abs(Offset));
+    case AArch64::LDRXpre:
+    case AArch64::LDRXpost:
+    case AArch64::LDRWpre:
+    case AArch64::LDRWpost:
+      // Load operations decrease stack pointer allocation
+      return -static_cast<int>(std::abs(Offset));
+    default:
+      return 0;
+    }
+  }
+
+  /// Helper function to analyze register pair operations with
+  /// pre/post-indexing.
+  int getPairAdjustment(const MCInst &Inst) const {
+    // AArch64 STP/LDP instructions have 5 operands:
+    // reg1, reg2, base_reg, ?, immediate (scaled by 8)
+    // Stack adjustment value is at operand index 4
+    if (Inst.getNumOperands() < 5) {
+      // Not enough operands, return 0
+      return 0;
+    }
+
+    if (!Inst.getOperand(4).isImm()) {
+      // Not an immediate operand, return 0
+      return 0;
+    }
+
+    int64_t Offset = Inst.getOperand(4).getImm();
+
+    switch (Inst.getOpcode()) {
+    case AArch64::STPXpre:
+    case AArch64::STPXpost:
+      // Store operations increase stack pointer allocation
+      // Immediate is scaled by 8, so multiply by 8
+      // Take absolute value since immediate is negative in assembly
+      return static_cast<int>(std::abs(Offset) * 8);
+    case AArch64::LDPXpre:
+    case AArch64::LDPXpost:
+      // Load operations decrease stack pointer allocation
+      return -static_cast<int>(std::abs(Offset) * 8);
+    case AArch64::STPWpre:
+    case AArch64::STPWpost:
+      // Store operations increase stack pointer allocation.
+      // W-pair immediate is scaled by 4.
+      return static_cast<int>(std::abs(Offset) * 4);
+    case AArch64::LDPWpre:
+    case AArch64::LDPWpost:
+      // Load operations decrease stack pointer allocation.
+      // W-pair immediate is scaled by 4.
+      return -static_cast<int>(std::abs(Offset) * 4);
+    default:
+      return 0;
+    }
+  }
+
+  /// Helper function to analyze ADD/SUB instructions with immediates.
+  int getImmediateAdjustment(const MCInst &Inst) const {
+    // For ADD/SUB instructions, operand 2 is the immediate
+    if (Inst.getNumOperands() < 3) {
+      // Not enough operands, return 0
+      return 0;
+    }
+
+    if (!Inst.getOperand(2).isImm()) {
+      // Not an immediate operand, return 0
+      return 0;
+    }
+
+    int64_t ImmValue = Inst.getOperand(2).getImm();
+
+    switch (Inst.getOpcode()) {
+    case AArch64::SUBXri:
+    case AArch64::SUBWri:
+      // SUB operations grow the stack (positive adjustment)
+      return static_cast<int>(ImmValue);
+
+    case AArch64::ADDXri:
+    case AArch64::ADDWri:
+      // ADD operations shrink the stack (negative adjustment)
+      return -static_cast<int>(ImmValue);
+    }
+    return 0;
+  }
+
+  /// Get the stack adjustment amount for a stack adjustment instruction.
+  /// This function unifies all stack adjustment detection by leveraging
+  /// the existing helper functions for better maintainability.
+  int getStackAdjustment(const MCInst &Inst) const override {
+    // Check immediate adjustments (ADD/SUB with SP)
+    if (isADD(Inst) || Inst.getOpcode() == AArch64::SUBWri ||
+        Inst.getOpcode() == AArch64::SUBXri) {
+      return getImmediateAdjustment(Inst);
+    }
+
+    // Check register pair operations (STP/LDP pre/post)
+    if (Inst.getOpcode() == AArch64::STPXpre ||
+        Inst.getOpcode() == AArch64::STPXpost ||
+        Inst.getOpcode() == AArch64::STPWpre ||
+        Inst.getOpcode() == AArch64::STPWpost ||
+        Inst.getOpcode() == AArch64::LDPXpre ||
+        Inst.getOpcode() == AArch64::LDPXpost ||
+        Inst.getOpcode() == AArch64::LDPWpre ||
+        Inst.getOpcode() == AArch64::LDPWpost) {
+      return getPairAdjustment(Inst);
+    }
+
+    // Check single register operations (STR/LDR pre/post)
+    if (Inst.getOpcode() == AArch64::STRXpre ||
+        Inst.getOpcode() == AArch64::STRXpost ||
+        Inst.getOpcode() == AArch64::STRWpre ||
+        Inst.getOpcode() == AArch64::STRWpost ||
+        Inst.getOpcode() == AArch64::LDRXpre ||
+        Inst.getOpcode() == AArch64::LDRXpost ||
+        Inst.getOpcode() == AArch64::LDRWpre ||
+        Inst.getOpcode() == AArch64::LDRWpost) {
+      return getSingleRegisterAdjustment(Inst);
+    }
+
+    return 0; // Not a stack adjustment instruction
+  }
 };
 
 } // end anonymous namespace
