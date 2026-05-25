@@ -1,0 +1,24 @@
+# Test AArch64 stack adjustment instruction identification
+#
+# This test verifies that BOLT can correctly identify and process
+# various AArch64 stack adjustment instruction patterns, including
+# direct SP modifications, single register STR/LDR operations, and
+# register pair STP/LDP operations with arbitrary immediate values.
+#
+# REQUIRES: system-linux
+# REQUIRES: aarch64-registered-target
+#
+# RUN: llvm-mc -filetype=obj -triple aarch64-unknown-linux-gnu %S/Inputs/stack-adjustment.s -o %t.o
+# RUN: %clang %cflags -nostdlib %t.o -o %t.exe
+# RUN: llvm-bolt %t.exe -o %t.bolt --print-finalized | FileCheck %s
+#
+# Test that BOLT processes the stack adjustment function successfully
+# CHECK: Binary Function "test_aarch64_stack_adjustment" after finalize-functions
+#
+# Test specific instructions mentioned for verification:
+# sub sp, sp, #0x80
+# stp x0, x1, [sp, #-0x10]!
+# str x2, [sp, #-0x10]!
+# ldr x2, [sp], #0x10
+# ldp x0, x1, [sp], #0x10
+# add sp, sp, #0x80

@@ -116,6 +116,15 @@ static cl::opt<bool>
                 cl::desc("print functions after inlining optimization"),
                 cl::Hidden, cl::cat(BoltOptCategory));
 
+static cl::opt<bool> PrintStackOps("print-stack-ops",
+                                   cl::desc("print stack ops test pass output"),
+                                   cl::Hidden, cl::cat(BoltOptCategory));
+
+static cl::opt<bool>
+    StackOpsTestPass("stack-ops-test-pass",
+                     cl::desc("run stack ops test pass for verification"),
+                     cl::Hidden, cl::cat(BoltOptCategory));
+
 static cl::opt<bool> PrintJTFootprintReduction(
     "print-after-jt-footprint-reduction",
     cl::desc("print function after jt-footprint-reduction pass"), cl::Hidden,
@@ -387,6 +396,9 @@ Error BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
 
   Manager.registerPass(std::make_unique<ShortenInstructions>(NeverPrint),
                        opts::ShortenInstructions);
+
+  Manager.registerPass(std::make_unique<StackOpsTestPass>(PrintStackOps),
+                       opts::StackOpsTestPass);
 
   Manager.registerPass(std::make_unique<RemoveNops>(NeverPrint),
                        !opts::KeepNops);

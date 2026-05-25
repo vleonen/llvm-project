@@ -497,6 +497,19 @@ public:
   Error runOnFunctions(BinaryContext &BC) override;
 };
 
+class StackOpsTestPass : public BinaryFunctionPass {
+  void runOnFunction(BinaryFunction &Function);
+
+public:
+  explicit StackOpsTestPass(const cl::opt<bool> &PrintPass)
+      : BinaryFunctionPass(PrintPass) {}
+
+  const char *getName() const override { return "stack-ops-test-pass"; }
+
+  /// Pass entry point
+  Error runOnFunctions(BinaryContext &BC) override;
+};
+
 enum FrameOptimizationType : char {
   FOP_NONE, /// Don't perform FOP.
   FOP_HOT,  /// Perform FOP on hot functions.
