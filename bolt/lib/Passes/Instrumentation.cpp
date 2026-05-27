@@ -83,7 +83,41 @@ cl::opt<bool> InstrumentCalls("instrument-calls",
                                        "control flow activity (default: true)"),
                               cl::init(true), cl::Optional,
                               cl::cat(BoltInstrCategory));
+
+cl::opt<bool> InstrumentCommonCounters(
+    "instrument-common-counters",
+    cl::desc("record profile for common counter instrumentation (branches and "
+             "direct calls, default: true)"),
+    cl::init(true), cl::Hidden, cl::Optional, cl::cat(BoltInstrCategory));
+
+cl::opt<bool> InstrumentIndirectCalls(
+    "instrument-indirect-calls",
+    cl::desc(
+        "record profile for indirect call instrumentation (default: true)"),
+    cl::init(true), cl::Hidden, cl::Optional, cl::cat(BoltInstrCategory));
+
+cl::opt<bool> InstrumentLeafNodes(
+    "instrument-leaf-nodes",
+    cl::desc("record profile for leaf node instrumentation (default: true)"),
+    cl::init(true), cl::Hidden, cl::Optional, cl::cat(BoltInstrCategory));
+
+cl::list<std::string> SkipInstrumentFunctions(
+    "skip-instrument-funcs", cl::CommaSeparated,
+    cl::desc("list of functions to skip instrumentation"),
+    cl::value_desc("func1,func2,func3,..."), cl::Hidden,
+    cl::cat(BoltInstrCategory));
 } // namespace opts
+
+static bool shouldSkipInstrumentation(const bolt::BinaryFunction &Function) {
+  if (opts::SkipInstrumentFunctions.empty())
+    return false;
+
+  for (const std::string &Name : opts::SkipInstrumentFunctions) {
+    if (Function.hasNameRegex(Name))
+      return true;
+  }
+  return false;
+}
 
 namespace llvm {
 namespace bolt {
@@ -331,7 +365,9 @@ bool Instrumentation::instrumentOneTarget(
       return false;
   }
 
-  InstructionListType CounterInstrs = createInstrumentationSnippet(BC, IsLeaf);
+  InstructionListType CounterInstrs;
+  if (opts::InstrumentCommonCounters)
+    CounterInstrs = createInstrumentationSnippet(BC, IsLeaf);
 
   const MCInst &Inst = *Iter;
   if (BC.MIB->isCall(Inst)) {
@@ -369,6 +405,9 @@ bool Instrumentation::instrumentOneTarget(
 void Instrumentation::instrumentFunction(BinaryFunction &Function,
                                          MCPlusBuilder::AllocatorIdTy AllocId) {
   if (Function.hasUnknownControlFlow())
+    return;
+
+  if (shouldSkipInstrumentation(Function))
     return;
 
   BinaryContext &BC = Function.getBinaryContext();
@@ -536,7 +575,8 @@ void Instrumentation::instrumentFunction(BinaryFunction &Function,
       // Handle indirect calls -- could be direct calls with unknown targets
       // or secondary entry points of known functions, so check it is indirect
       // to be sure.
-      if (opts::InstrumentCalls && BC.MIB->isIndirectCall(*I))
+      if (opts::InstrumentCalls && opts::InstrumentIndirectCalls &&
+          BC.MIB->isIndirectCall(*I))
         instrumentIndirectTarget(BB, I, Function, FromOffset);
 
     } // End of instructions loop
@@ -576,7 +616,7 @@ void Instrumentation::instrumentFunction(BinaryFunction &Function,
   } // End of BBs loop
 
   // Instrument spanning tree leaves
-  if (!opts::ConservativeInstrumentation) {
+  if (!opts::ConservativeInstrumentation && opts::InstrumentLeafNodes) {
     for (auto BBI = Function.begin(), BBE = Function.end(); BBI != BBE; ++BBI) {
       BinaryBasicBlock &BB = *BBI;
       if (STOutSet[&BB].size() == 0)
@@ -619,7 +659,8 @@ Error Instrumentation::runOnFunctions(BinaryContext &BC) {
 
   ParallelUtilities::PredicateTy SkipPredicate = [&](const BinaryFunction &BF) {
     return (!BF.isSimple() || BF.isIgnored() ||
-            (opts::InstrumentHotOnly && !BF.getKnownExecutionCount()));
+            (opts::InstrumentHotOnly && !BF.getKnownExecutionCount()) ||
+            shouldSkipInstrumentation(BF));
   };
 
   ParallelUtilities::WorkFuncWithAllocTy WorkFun =
