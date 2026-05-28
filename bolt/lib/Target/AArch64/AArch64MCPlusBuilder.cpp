@@ -53,7 +53,8 @@ static void setSystemFlag(MCInst &Inst, MCPhysReg RegName) {
   Inst.addOperand(MCOperand::createReg(RegName));
 }
 
-static void createPushRegisters(MCInst &Inst, MCPhysReg Reg1, MCPhysReg Reg2) {
+static void createPushRegisters(MCInst &Inst, MCPhysReg Reg1, MCPhysReg Reg2,
+                                bool PreserveRedZone = false) {
   Inst.clear();
   unsigned NewOpcode = AArch64::STPXpre;
   Inst.setOpcode(NewOpcode);
@@ -61,10 +62,11 @@ static void createPushRegisters(MCInst &Inst, MCPhysReg Reg1, MCPhysReg Reg2) {
   Inst.addOperand(MCOperand::createReg(Reg1));
   Inst.addOperand(MCOperand::createReg(Reg2));
   Inst.addOperand(MCOperand::createReg(AArch64::SP));
-  Inst.addOperand(MCOperand::createImm(-2));
+  Inst.addOperand(MCOperand::createImm(PreserveRedZone ? -18 : -2));
 }
 
-static void createPopRegisters(MCInst &Inst, MCPhysReg Reg1, MCPhysReg Reg2) {
+static void createPopRegisters(MCInst &Inst, MCPhysReg Reg1, MCPhysReg Reg2,
+                               bool PreserveRedZone = false) {
   Inst.clear();
   unsigned NewOpcode = AArch64::LDPXpost;
   Inst.setOpcode(NewOpcode);
@@ -72,7 +74,7 @@ static void createPopRegisters(MCInst &Inst, MCPhysReg Reg1, MCPhysReg Reg2) {
   Inst.addOperand(MCOperand::createReg(Reg1));
   Inst.addOperand(MCOperand::createReg(Reg2));
   Inst.addOperand(MCOperand::createReg(AArch64::SP));
-  Inst.addOperand(MCOperand::createImm(2));
+  Inst.addOperand(MCOperand::createImm(PreserveRedZone ? 18 : 2));
 }
 
 static void loadReg(MCInst &Inst, MCPhysReg To, MCPhysReg From) {
@@ -2542,7 +2544,12 @@ public:
 
     InstructionListType Insts;
     Insts.emplace_back();
-    createPushRegisters(Insts.back(), CallIDReg, AArch64::LR);
+    // Red-zone-preserving push/pop is needed only for golang (small
+    // goroutine stacks / signal-handler contexts); regular instrumented
+    // binaries keep the smaller frames.
+    createPushRegisters(Insts.back(), CallIDReg, AArch64::LR,
+                        /*PreserveRedZone*/
+                        GolangMode);
 
     InstructionListType LoadImm = createLoadImmediate(CallIDReg, CallSiteID);
     Insts.insert(Insts.end(), LoadImm.begin(), LoadImm.end());
@@ -2563,7 +2570,9 @@ public:
     loadReg(Insts.back(), TAReg, getStackPointer());
 
     Insts.emplace_back();
-    createPopRegisters(Insts.back(), CallIDReg, AArch64::LR);
+    createPopRegisters(Insts.back(), CallIDReg, AArch64::LR,
+                       /*PreserveRedZone*/
+                       GolangMode);
 
     Insts.emplace_back(CallInst);
 
@@ -2623,12 +2632,19 @@ public:
   InstructionListType
   createInstrIncMemory(const MCSymbol *Target, MCContext *Ctx, bool IsLeaf,
                        unsigned CodePointerSize) const override {
+    // The red-zone-preserving push (stp ..., [sp, #-144]!) already moves SP
     unsigned int I = 0;
-    InstructionListType Instrs(IsLeaf ? 12 : 10);
+    // The red-zone-preserving push (stp ..., [sp, #-144]!) already moves SP
+    // past the 128-byte red zone, so a separate leaf reservation would
+    // double-reserve (272 bytes). Only reserve the red zone explicitly for
+    // leaf functions when the push does not preserve it.
+    const bool PreserveRedZone = GolangMode;
+    const bool ReserveLeafRedZone = IsLeaf && !PreserveRedZone;
+    InstructionListType Instrs(ReserveLeafRedZone ? 12 : 10);
 
-    if (IsLeaf)
+    if (ReserveLeafRedZone)
       createStackPointerIncrement(Instrs[I++], 128);
-    createPushRegisters(Instrs[I++], AArch64::X0, AArch64::X1);
+    createPushRegisters(Instrs[I++], AArch64::X0, AArch64::X1, PreserveRedZone);
     getSystemFlag(Instrs[I++], AArch64::X1);
     InstructionListType Addr = materializeAddress(Target, Ctx, AArch64::X0);
     assert(Addr.size() == 2 && "Invalid Addr size");
@@ -2641,8 +2657,8 @@ public:
     I += Insts.size();
     loadReg(Instrs[I++], AArch64::X2, AArch64::SP);
     setSystemFlag(Instrs[I++], AArch64::X1);
-    createPopRegisters(Instrs[I++], AArch64::X0, AArch64::X1);
-    if (IsLeaf)
+    createPopRegisters(Instrs[I++], AArch64::X0, AArch64::X1, PreserveRedZone);
+    if (ReserveLeafRedZone)
       createStackPointerDecrement(Instrs[I++], 128);
     return Instrs;
   }
