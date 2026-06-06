@@ -278,15 +278,24 @@ void reportError(const char *Msg, uint64_t Size) {
   __exit(1);
 }
 
-void assert(bool Assertion, const char *Msg) {
+/// assert() must never cost stack space on the success path: the runtime
+/// executes on the profiled program's stack, which can be a small Go
+/// goroutine stack that cannot grow through C frames. Hence assert() is an
+/// inline early-return check and all message formatting is outlined into
+/// this cold function, which uses no buffer and never returns. The stderr
+/// writes are not atomic (interleaving is possible in multithreaded
+/// programs), which is acceptable on this fatal path.
+__attribute__((noinline, cold)) void assertFail(const char *Msg) {
+  report("Assertion failed: ");
+  __write(2, Msg, strLen(Msg));
+  report("\n");
+  __exit(1);
+}
+
+inline void assert(bool Assertion, const char *Msg) {
   if (Assertion)
     return;
-  char Buf[BufSize];
-  char *Ptr = Buf;
-  Ptr = strCopy(Ptr, "Assertion failed: ");
-  Ptr = strCopy(Ptr, Msg, BufSize - 40);
-  Ptr = strCopy(Ptr, "\n");
-  reportError(Buf, Ptr - Buf);
+  assertFail(Msg);
 }
 
 #define SIG_BLOCK 0
