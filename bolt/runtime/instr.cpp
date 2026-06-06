@@ -151,7 +151,7 @@ public:
     return AllocAddress;
   }
 
-#ifdef DEBUG
+#ifdef ENABLE_DEBUG
   /// Element-wise deallocation is only used for debugging to catch memory
   /// bugs by checking magic bytes. Ordinarily, we reset the allocator once
   /// we are done with it. Reset is done with clear(). There's no need
