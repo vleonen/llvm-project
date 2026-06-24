@@ -4069,8 +4069,10 @@ void RewriteInstance::emitAndLink() {
                      TimerGroupDesc, opts::TimeRewrite);
 
   if (opts::Rewrite) {
-    // Defensive bail: dynamic binaries require .dynamic and .eh_frame_hdr
-    // patching which is not yet implemented in -rewrite mode.
+    // Dynamic binaries require .dynamic and .eh_frame_hdr patching.
+    // The patching code is in place (patchELFDynamic, writeEHFrameHeader),
+    // but full runtime support (PLT/GOT/ADRP relocation) is not yet
+    // implemented. Reject dynamic binaries until that lands.
     bool HasDynamic = false;
     for (const ProgramHeader &Phdr : BC->InputSegments)
       if (Phdr.p_type == ELF::PT_DYNAMIC) {
@@ -4079,7 +4081,7 @@ void RewriteInstance::emitAndLink() {
       }
     if (HasDynamic) {
       BC->errs() << "BOLT-ERROR: -rewrite does not yet support dynamic binaries"
-                    " (.dynamic / .eh_frame_hdr patching pending)\n";
+                    " (runtime relocation pending)\n";
       exit(1);
     }
   }
@@ -5241,6 +5243,14 @@ RewriteInstance::getOutputSections(ELFObjectFile<ELFT> *File,
   auto addSection = [&](const ELFShdrTy &Section, BinarySection &BinSec) {
     ELFShdrTy NewSection = Section;
     NewSection.sh_name = SHStrTab.getOffset(BinSec.getOutputName());
+    // In -rewrite mode, update address and offset from the BinarySection's
+    // output values since all sections are relocated to new addresses.
+    if (opts::Rewrite && BinSec.isAllocatable() &&
+        BinSec.getOutputAddress()) {
+      NewSection.sh_addr = BinSec.getOutputAddress();
+      NewSection.sh_offset = BinSec.getOutputFileOffset();
+      NewSection.sh_size = BinSec.getOutputSize();
+    }
     OutputSections.emplace_back(&BinSec, std::move(NewSection));
   };
 
@@ -6305,6 +6315,16 @@ void RewriteInstance::patchELFDynamic(ELFObjectFile<ELFT> *File) {
   typename ELFT::DynRange DynamicEntries =
       cantFail(Obj.dynamicEntries(), "error accessing dynamic table");
   auto DTB = DynamicEntries.begin();
+
+  // In -rewrite mode, the .dynamic section itself moved. Use its output
+  // file offset for pwrites.
+  uint64_t RewriteDynamicOffset = DynamicOffset;
+  if (opts::Rewrite) {
+    ErrorOr<BinarySection &> DynSec = BC->getSectionForAddress(DynamicPhdr->p_vaddr);
+    if (DynSec && DynSec->getOutputFileOffset())
+      RewriteDynamicOffset = DynSec->getOutputFileOffset();
+  }
+
   for (const Elf_Dyn &Dyn : DynamicEntries) {
     Elf_Dyn NewDE = Dyn;
     bool ShouldPatch = true;
@@ -6359,10 +6379,36 @@ void RewriteInstance::patchELFDynamic(ELFObjectFile<ELFT> *File) {
         ZNowSet = true;
       }
       break;
+    // In -rewrite mode, patch address-valued DT entries to point to the
+    // new output addresses of their owning sections.
+    case ELF::DT_INIT_ARRAY:
+    case ELF::DT_FINI_ARRAY:
+    case ELF::DT_GNU_HASH:
+    case ELF::DT_SYMTAB:
+    case ELF::DT_STRTAB:
+    case ELF::DT_PLTGOT:
+    case ELF::DT_RELA:
+    case ELF::DT_RELRSZ:
+    case ELF::DT_RELR:
+    case ELF::DT_JMPREL:
+    case ELF::DT_VERNEED:
+    case ELF::DT_VERSYM:
+    case ELF::DT_HASH: {
+      if (!opts::Rewrite)
+        break;
+      const uint64_t OldAddr = Dyn.getPtr();
+      ErrorOr<BinarySection &> Sec = BC->getSectionForAddress(OldAddr);
+      if (Sec && Sec->getOutputAddress()) {
+        const uint64_t OldSecAddr = Sec->getAddress();
+        const uint64_t NewSecAddr = Sec->getOutputAddress();
+        NewDE.d_un.d_ptr = NewSecAddr + (OldAddr - OldSecAddr);
+      }
+      break;
+    }
     }
     if (ShouldPatch)
       OS.pwrite(reinterpret_cast<const char *>(&NewDE), sizeof(NewDE),
-                DynamicOffset + (&Dyn - DTB) * sizeof(Dyn));
+                RewriteDynamicOffset + (&Dyn - DTB) * sizeof(Dyn));
   }
 
   if (BC->RequiresZNow && !ZNowSet) {
@@ -6807,6 +6853,37 @@ void RewriteInstance::writeEHFrameHeader() {
 
   LLVM_DEBUG(dbgs() << "BOLT: writing a new " << getEHFrameHdrSectionName()
                     << '\n');
+
+  // In -rewrite mode, the .eh_frame_hdr section has been assigned an address
+  // by the segment-based layout. Generate the header at that address.
+  if (opts::Rewrite) {
+    BinarySection *EHFrameHdrSec = getSection(getEHFrameHdrSectionName());
+    if (!EHFrameHdrSec || !EHFrameHdrSec->getOutputAddress()) {
+      // .eh_frame_hdr not present or not laid out; nothing to do.
+      return;
+    }
+    const uint64_t EHFrameHdrOutputAddress = EHFrameHdrSec->getOutputAddress();
+    const uint64_t EHFrameHdrFileOffset = EHFrameHdrSec->getOutputFileOffset();
+
+    std::vector<char> NewEHFrameHdr = CFIRdWrt->generateEHFrameHeader(
+        RelocatedEHFrame, NewEHFrame, EHFrameHdrOutputAddress);
+
+    if (NewEHFrameHdr.size() > EHFrameHdrSec->getOutputSize()) {
+      BC->errs() << "BOLT-ERROR: generated " << getEHFrameHdrSectionName()
+                 << " (" << NewEHFrameHdr.size()
+                 << " bytes) exceeds reserved space ("
+                 << EHFrameHdrSec->getOutputSize() << " bytes)\n";
+      exit(1);
+    }
+
+    Out->os().seek(EHFrameHdrFileOffset);
+    Out->os().write(NewEHFrameHdr.data(), NewEHFrameHdr.size());
+    // Pad with zeros if the section is larger.
+    if (NewEHFrameHdr.size() < EHFrameHdrSec->getOutputSize())
+      Out->os().write_zeros(EHFrameHdrSec->getOutputSize() -
+                            NewEHFrameHdr.size());
+    return;
+  }
 
   // Try to overwrite the original .eh_frame_hdr if the size permits.
   uint64_t EHFrameHdrOutputAddress = 0;
