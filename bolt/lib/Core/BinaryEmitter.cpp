@@ -1214,19 +1214,29 @@ void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
   for (BinarySection &Section : BC.sections()) {
     if (opts::Rewrite) {
       // In rewrite mode, emit all allocatable sections so they appear in the
-      // intermediate object and receive new addresses via JITLink. Skip
-      // original text sections (those renamed with OrgSecPrefix) since they
-      // are replaced by emitFunctions() — emitting them would cause
-      // BinarySection conflicts in ExecutableFileMemoryManager.
+      // intermediate object and receive new addresses via JITLink.
       if (!Section.isAllocatable() || Section.isLinkOnly())
         continue;
-      if (Section.isText() && Section.getName().starts_with(OrgSecPrefix))
+      // Skip BOLT-internal sections (OrgSecPrefix = renamed originals).
+      // Original text is replaced by emitFunctions(). Original data sections
+      // are emitted under their original names (OrgSecPrefix is NOT applied
+      // to non-renamed sections below).
+      if (Section.getName().starts_with(OrgSecPrefix))
+        continue;
+      // Skip empty BOLT-created sections (e.g. .bolt.new.rodata with size 0).
+      if (Section.getOutputSize() == 0)
         continue;
     } else if (!Section.hasRelocations()) {
       continue;
     }
 
-    StringRef Prefix = Section.hasSectionRef() ? OrgSecPrefix : "";
+    // Apply OrgSecPrefix only to original sections that haven't been renamed.
+    // Sections already renamed with OrgSecPrefix (e.g. .bolt.org.text) are
+    // skipped above.
+    StringRef Prefix =
+        (Section.hasSectionRef() && !Section.getName().starts_with(OrgSecPrefix))
+            ? OrgSecPrefix
+            : "";
     Section.emitAsData(Streamer, Prefix + Section.getName());
     Section.clearRelocations();
   }
