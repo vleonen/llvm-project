@@ -213,7 +213,22 @@ void BinaryEmitter::emitAll(StringRef OrgSecPrefix) {
   if (RuntimeLibrary *RtLibrary = BC.getRuntimeLibrary())
     RtLibrary->emitBinary(BC, Streamer);
 
-  BC.getTextSection()->setAlignment(Align(opts::AlignText));
+  // In -rewrite mode, preserve the original .text section alignment
+  // instead of applying huge page alignment. The binary is repacked from
+  // scratch, so inflated alignment would waste file/address space.
+  if (opts::Rewrite) {
+    // The original .text section was renamed to .bolt.org.text before
+    // emission. Look it up to get the original alignment.
+    std::string OrigTextName =
+        (Twine(".bolt.org.") + BC.getMainCodeSectionName()).str();
+    ErrorOr<BinarySection &> OrigText = BC.getUniqueSectionByName(OrigTextName);
+    if (OrigText)
+      BC.getTextSection()->setAlignment(Align(OrigText->getAlignment()));
+    else
+      BC.getTextSection()->setAlignment(Align(BC.RegularPageSize));
+  } else {
+    BC.getTextSection()->setAlignment(Align(opts::AlignText));
+  }
 
   emitFunctions();
 
