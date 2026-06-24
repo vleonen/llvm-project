@@ -769,6 +769,9 @@ Error RewriteInstance::run() {
 
   finalizeMetadataPreEmit();
 
+  if (opts::Rewrite)
+    finalizeInputSectionsForRewrite();
+
   emitAndLink();
 
   updateMetadata();
@@ -2649,10 +2652,11 @@ void RewriteInstance::readRelocations(const SectionRef &Section) {
                       << "non-allocatable section\n");
     return;
   }
-  const bool SkipRelocs = StringSwitch<bool>(RelocatedSectionName)
-                              .Cases(".plt", ".rela.plt", ".got.plt",
-                                     ".eh_frame", ".gcc_except_table", true)
-                              .Default(false);
+  const bool SkipRelocs =
+      StringSwitch<bool>(RelocatedSectionName)
+          .Cases(".plt", ".rela.plt", ".eh_frame", ".gcc_except_table", true)
+          .Case(".got.plt", !opts::Rewrite)
+          .Default(false);
   if (SkipRelocs) {
     LLVM_DEBUG(
         dbgs() << "BOLT-DEBUG: ignoring relocations against known section\n");
@@ -3666,6 +3670,18 @@ void RewriteInstance::preregisterSections() {
                               ROFlags);
   BC->registerOrUpdateSection(getNewSecPrefix() + ".rodata.cold",
                               ELF::SHT_PROGBITS, ROFlags);
+}
+
+void RewriteInstance::finalizeInputSectionsForRewrite() {
+  for (BinarySection &Section : BC->allocatableSections()) {
+    if (!Section.hasSectionRef() || Section.isLinkOnly())
+      continue;
+    // Initialize output contents from input so the section is emitted by
+    // emitDataSections and written at its new offset during file rewrite.
+    Section.updateContents(
+        reinterpret_cast<const uint8_t *>(Section.getContents().data()),
+        Section.getSize());
+  }
 }
 
 void RewriteInstance::emitAndLink() {
