@@ -538,6 +538,10 @@ Error RewriteInstance::discoverStorage() {
 
   ELF64LE::PhdrRange PHs = PHsOrErr.get();
   for (const ELF64LE::Phdr &Phdr : PHs) {
+    // Snapshot all input program headers for -rewrite segment-based layout.
+    BC->InputSegments.emplace_back(Phdr.p_type, Phdr.p_flags, Phdr.p_offset,
+                                   Phdr.p_vaddr, Phdr.p_paddr, Phdr.p_filesz,
+                                   Phdr.p_memsz, Phdr.p_align);
     switch (Phdr.p_type) {
     case ELF::PT_LOAD:
       BC->FirstAllocAddress = std::min(BC->FirstAllocAddress,
@@ -555,6 +559,8 @@ Error RewriteInstance::discoverStorage() {
                       Phdr.p_align,
                       (Phdr.p_flags & ELF::PF_X) != 0,
                       (Phdr.p_flags & ELF::PF_W) != 0};
+      if (!(Phdr.p_flags & ELF::PF_X) && !(Phdr.p_flags & ELF::PF_W))
+        BC->HasReadOnlySegment = true;
       if (BC->TheTriple->getArch() == llvm::Triple::x86_64 &&
           Phdr.p_vaddr >= BinaryContext::KernelStartX86_64)
         BC->IsLinuxKernel = true;
@@ -2149,6 +2155,31 @@ void RewriteInstance::adjustCommandLineOptions() {
     opts::UseOldText = false;
   }
 
+  if (opts::Rewrite) {
+    if (!BC->HasRelocations) {
+      BC->errs() << "BOLT-ERROR: -rewrite requires relocation mode\n";
+      exit(1);
+    }
+    if (opts::UseOldText) {
+      BC->errs() << "BOLT-ERROR: -rewrite is incompatible with -use-old-text\n";
+      exit(1);
+    }
+    if (opts::UseGnuStack) {
+      BC->errs()
+          << "BOLT-ERROR: -rewrite is incompatible with -use-gnu-stack\n";
+      exit(1);
+    }
+    if (opts::Instrument) {
+      BC->errs() << "BOLT-ERROR: -rewrite is incompatible with -instrument\n";
+      exit(1);
+    }
+    if (!BC->isAArch64() && !BC->isX86()) {
+      BC->errs()
+          << "BOLT-ERROR: -rewrite is only supported on AArch64 and X86\n";
+      exit(1);
+    }
+  }
+
   if (!opts::AlignText.getNumOccurrences())
     opts::AlignText = BC->PageAlign;
 
@@ -3642,6 +3673,11 @@ void RewriteInstance::preregisterSections() {
 void RewriteInstance::emitAndLink() {
   NamedRegionTimer T("emitAndLink", "emit and link", TimerGroupName,
                      TimerGroupDesc, opts::TimeRewrite);
+
+  if (opts::Rewrite) {
+    BC->errs() << "BOLT-ERROR: -rewrite mode is not yet implemented\n";
+    exit(1);
+  }
 
   SmallString<0> ObjectBuffer;
   raw_svector_ostream OS(ObjectBuffer);
@@ -5748,6 +5784,10 @@ Error RewriteInstance::readELFDynamic(ELFObjectFile<ELFT> *File) {
       break;
     case ELF::DT_RELRENT:
       DynamicRelrEntrySize = Dyn.getVal();
+      break;
+    case ELF::DT_FLAGS_1:
+      if (Dyn.d_un.d_val & ELF::DF_1_NOW)
+        BC->RequiresZNow = true;
       break;
     }
   }
