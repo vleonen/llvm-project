@@ -1194,8 +1194,14 @@ void BinaryEmitter::emitDebugLineInfoForUnprocessedCUs() {
 
 void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
   for (BinarySection &Section : BC.sections()) {
-    if (!Section.hasRelocations())
+    if (opts::Rewrite) {
+      // In rewrite mode, emit all allocatable sections so they appear in the
+      // intermediate object and receive new addresses via JITLink.
+      if (!Section.isAllocatable() || Section.isLinkOnly())
+        continue;
+    } else if (!Section.hasRelocations()) {
       continue;
+    }
 
     StringRef Prefix = Section.hasSectionRef() ? OrgSecPrefix : "";
     Section.emitAsData(Streamer, Prefix + Section.getName());
