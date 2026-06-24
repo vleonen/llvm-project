@@ -3168,6 +3168,11 @@ void RewriteInstance::disassembleFunctions() {
       continue;
     }
 
+    // Skip functions already processed (e.g. PLT functions populated by
+    // disassemblePLTSectionAArch64 in -rewrite mode).
+    if (Function.getState() != BinaryFunction::State::Empty)
+      continue;
+
     // Offset of the function in the file.
     const auto *FileBegin =
         reinterpret_cast<const uint8_t *>(InputFile->getData().data());
@@ -3355,6 +3360,11 @@ void RewriteInstance::preregisterSections() {
 void RewriteInstance::finalizeInputSectionsForRewrite() {
   for (BinarySection &Section : BC->allocatableSections()) {
     if (!Section.hasSectionRef() || Section.isLinkOnly())
+      continue;
+    // Skip text sections — they are fully replaced by emitFunctions().
+    // Finalizing them with original bytes would cause the original code to
+    // be written instead of the BOLT-generated optimized code.
+    if (Section.isText())
       continue;
     // Initialize output contents from input so the section is emitted by
     // emitDataSections and written at its new offset during file rewrite.
@@ -3573,6 +3583,10 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
         continue;
       if (MappedSections.count(&Section))
         continue;
+      // Skip BOLT-internal sections (renamed originals with OrgSecPrefix).
+      // These are not emitted to the output in -rewrite mode.
+      if (Section.getName().starts_with(getOrgSecPrefix()))
+        continue;
       if (!Phdr.contains(Section))
         continue;
       if (Section.isBSS())
@@ -3583,7 +3597,6 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
     }
 
     // Also collect new BOLT-created sections matching this segment's flags.
-    const unsigned SegFlags = Phdr.getSectionFlags();
     for (BinarySection &Section : BC->allocatableSections()) {
       if (Section.isLinkOnly() || !Section.hasValidSectionID())
         continue;
@@ -4489,6 +4502,16 @@ RewriteInstance::getOutputSections(ELFObjectFile<ELFT> *File,
     BinarySection *BinSec = BC->getSectionForSectionRef(SecRef);
     assert(BinSec && "Matching BinarySection should exist.");
 
+    // Exclude anonymous sections.
+    if (BinSec->isAnonymous())
+      continue;
+
+    // In -rewrite mode, exclude BOLT-internal sections (renamed originals
+    // with OrgSecPrefix) from the section header table. These sections are
+    // not written to the output and should not appear in the section headers.
+    if (opts::Rewrite && BinSec->getName().starts_with(getOrgSecPrefix()))
+      continue;
+
     addSection(Section, BinSec);
   }
 
@@ -4502,6 +4525,12 @@ RewriteInstance::getOutputSections(ELFObjectFile<ELFT> *File,
                << Section.getOutputName() << '\n';
       continue;
     }
+
+    // In -rewrite mode, skip BOLT-internal sections (NewSecPrefix) that
+    // are not part of the output binary.
+    if (opts::Rewrite && Section.getName().starts_with(getNewSecPrefix()) &&
+        Section.getOutputSize() == 0)
+      continue;
 
     if (opts::Verbosity >= 1)
       outs() << "BOLT-INFO: writing section header for "
@@ -5823,6 +5852,17 @@ void RewriteInstance::rewriteFile() {
       continue;
     if (Section.isLinkOnly())
       continue;
+    // In -rewrite mode, skip all BOLT-internal sections (renamed originals
+    // with OrgSecPrefix and new sections with NewSecPrefix). Original text
+    // is replaced by emitFunctions(); original data sections are emitted
+    // via emitDataSections under clean names. These prefixed sections should
+    // not appear in the output binary.
+    if (opts::Rewrite && (Section.getName().starts_with(getOrgSecPrefix()) ||
+                          Section.getName().starts_with(getNewSecPrefix()))) {
+      LLVM_DEBUG(dbgs() << "BOLT-DEBUG: skipping BOLT-internal section "
+                        << Section.getName() << " in rewrite mode\n");
+      continue;
+    }
 
     if (opts::Verbosity >= 1)
       outs() << "BOLT: writing new section " << Section.getName()

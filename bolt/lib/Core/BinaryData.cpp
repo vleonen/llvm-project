@@ -92,7 +92,9 @@ void BinaryData::setSection(BinarySection &NewSection) {
 }
 
 bool BinaryData::isMoved() const {
-  return (getOffset() != OutputOffset || OutputSection != Section);
+  return (getOffset() != OutputOffset || OutputSection != Section ||
+          (OutputSection->getOutputAddress() &&
+           OutputSection->getOutputAddress() != Section->getAddress()));
 }
 
 void BinaryData::print(raw_ostream &OS) const { printBrief(OS); }
