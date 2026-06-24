@@ -192,6 +192,11 @@ private:
   /// performing final relaxation.
   void emitAndLink();
 
+  /// In -rewrite mode, mark all allocatable input sections as finalized with
+  /// their original contents so they are emitted into the intermediate object
+  /// and written at their new offsets during file rewrite.
+  void finalizeInputSectionsForRewrite();
+
   /// Process metadata in sections before functions are discovered.
   void processSectionMetadata();
 
