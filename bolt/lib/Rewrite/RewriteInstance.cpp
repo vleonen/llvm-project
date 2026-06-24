@@ -3533,6 +3533,15 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
                                   PHDRTableAddress, PHDRTableAddress,
                                   BC->MaxPHDRSize, BC->MaxPHDRSize, 0x8);
 
+  // Track sections that have been mapped to avoid double-mapping.
+  DenseSet<BinarySection *> MappedSections;
+
+  // Helper: check if a section name is PLT-related.
+  auto isPLTSection = [](StringRef Name) {
+    return Name == ".plt" || Name == ".plt.got" || Name == ".plt.sec" ||
+           Name == ".iplt";
+  };
+
   // Iterate input PT_LOAD segments and repack their sections.
   bool IsFirstLoad = true;
   for (const ProgramHeader &Phdr : BC->InputSegments) {
@@ -3540,22 +3549,23 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
       continue;
 
     const uint64_t Align = Phdr.p_align;
-    NextAvailableAddress = alignTo(NextAvailableAddress, Align);
-    NextAvailableOffset = alignTo(NextAvailableOffset, Align);
 
     // The first LOAD segment must start at offset 0 / base address so the
-    // ELF header and PHDR table are part of its file image, as expected by
-    // the loader.
+    // ELF header and PHDR table are part of its file image. Sections are
+    // placed after the PHDR table.
+    uint64_t SegmentStartAddress, SegmentStartOffset;
     if (IsFirstLoad) {
-      NextAvailableAddress = BaseAddress;
-      NextAvailableOffset = 0;
+      SegmentStartAddress = BaseAddress;
+      SegmentStartOffset = 0;
+      NextAvailableAddress = BaseAddress + PHDRTableOffset + BC->MaxPHDRSize;
+      NextAvailableOffset = PHDRTableOffset + BC->MaxPHDRSize;
       IsFirstLoad = false;
+    } else {
+      NextAvailableAddress = alignTo(NextAvailableAddress, Align);
+      NextAvailableOffset = alignTo(NextAvailableOffset, Align);
+      SegmentStartAddress = NextAvailableAddress;
+      SegmentStartOffset = NextAvailableOffset;
     }
-
-    const uint64_t SegmentStartAddress = NextAvailableAddress;
-    const uint64_t SegmentStartOffset = NextAvailableOffset;
-    uint64_t FileSize = 0;
-    uint64_t MemSize = 0;
 
     // Collect sections that belong to this segment (by original address range).
     // Separate NOBITS sections to place them at the end.
@@ -3564,12 +3574,15 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
     for (BinarySection &Section : BC->allocatableSections()) {
       if (Section.isLinkOnly() || !Section.hasValidSectionID())
         continue;
+      if (MappedSections.count(&Section))
+        continue;
       if (!Phdr.contains(Section))
         continue;
       if (Section.isBSS())
         NobitsSections.push_back(&Section);
       else
         Sections.push_back(&Section);
+      MappedSections.insert(&Section);
     }
 
     // Also collect new BOLT-created sections matching this segment's flags.
@@ -3577,14 +3590,36 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
     for (BinarySection &Section : BC->allocatableSections()) {
       if (Section.isLinkOnly() || !Section.hasValidSectionID())
         continue;
+      if (MappedSections.count(&Section))
+        continue;
       if (Section.hasSectionRef())
         continue; // Already handled above
-      if ((Section.getELFFlags() & SegFlags) != SegFlags)
+      // Match exec/write permissions to avoid placing executable sections
+      // in non-executable segments (and vice versa).
+      const bool SecExec = Section.getELFFlags() & ELF::SHF_EXECINSTR;
+      const bool SecWrite = Section.getELFFlags() & ELF::SHF_WRITE;
+      if (SecExec != Phdr.isExec() || SecWrite != (bool)(Phdr.p_flags & ELF::PF_W))
         continue;
       if (Section.isBSS())
         NobitsSections.push_back(&Section);
       else
         Sections.push_back(&Section);
+      MappedSections.insert(&Section);
+    }
+
+    // For executable segments, sort sections so that PLT sections come
+    // before .text. This keeps PLT entries within branch range of the
+    // code that calls them, which is important for AArch64 PLT-as-functions
+    // and for LongJmp stub reachability.
+    if (Phdr.isExec()) {
+      llvm::stable_sort(Sections, [&isPLTSection](BinarySection *A,
+                                                   BinarySection *B) {
+        bool AIsPLT = isPLTSection(A->getName());
+        bool BIsPLT = isPLTSection(B->getName());
+        if (AIsPLT != BIsPLT)
+          return AIsPLT; // PLT sections come first
+        return A->getAddress() < B->getAddress(); // Stable by original address
+      });
     }
 
     // Map file-backed sections.
@@ -3601,8 +3636,6 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
 
       NextAvailableAddress += Size;
       NextAvailableOffset += Size;
-      FileSize += Size;
-      MemSize += Size;
     }
 
     // Map NOBITS sections at the end (memory only, no file space).
@@ -3617,14 +3650,46 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
       MapSection(*Section, NextAvailableAddress);
 
       NextAvailableAddress += Size;
-      MemSize += Size;
-      // Don't advance NextAvailableOffset or FileSize for NOBITS.
+      // Don't advance NextAvailableOffset for NOBITS.
     }
+
+    // Compute segment sizes from the actual range (includes ELF header +
+    // PHDR table for the first LOAD segment).
+    const uint64_t FileSize = NextAvailableOffset - SegmentStartOffset;
+    const uint64_t MemSize = NextAvailableAddress - SegmentStartAddress;
 
     // Create output PT_LOAD segment.
     BC->OutputSegments.emplace_back(
         ELF::PT_LOAD, Phdr.p_flags, SegmentStartOffset, SegmentStartAddress,
         SegmentStartAddress, FileSize, MemSize, Align);
+  }
+
+  // Handle stray allocatable sections that were not claimed by any input
+  // segment (e.g. zero-size sections outside segment address ranges).
+  // Place them at the end of the last segment's file offset.
+  for (BinarySection &Section : BC->allocatableSections()) {
+    if (Section.isLinkOnly() || !Section.hasValidSectionID())
+      continue;
+    if (MappedSections.count(&Section))
+      continue;
+    if (Section.getOutputAddress())
+      continue; // Already mapped by some other path
+
+    const uint64_t Alignment = Section.getAlignment();
+    NextAvailableAddress = alignTo(NextAvailableAddress, Alignment);
+    NextAvailableOffset = alignTo(NextAvailableOffset, Alignment);
+
+    const uint64_t Size = Section.getOutputSize();
+    Section.setOutputAddress(NextAvailableAddress);
+    Section.setOutputFileOffset(NextAvailableOffset);
+    BC->OutputAddressToOffsetMap[NextAvailableAddress] = NextAvailableOffset;
+    MapSection(Section, NextAvailableAddress);
+
+    if (!Section.isBSS()) {
+      NextAvailableOffset += Size;
+    }
+    NextAvailableAddress += Size;
+    MappedSections.insert(&Section);
   }
 
   // Handle non-LOAD segments (PT_GNU_STACK, PT_INTERP, etc.).
@@ -5917,12 +5982,13 @@ uint64_t RewriteInstance::getNewValueForSymbol(const StringRef Name) {
 }
 
 uint64_t RewriteInstance::getFileOffsetForAddress(uint64_t Address) const {
-  // In -rewrite mode, use the output address-to-offset map.
+  // In -rewrite mode, prefer the output address-to-offset map (populated
+  // after layout). Fall through to SegmentMapInfo if the address is not yet
+  // in the map (e.g. during discoverStorage before layout).
   if (opts::Rewrite) {
     const auto It = BC->OutputAddressToOffsetMap.find(Address);
     if (It != BC->OutputAddressToOffsetMap.end())
       return It->second;
-    return 0;
   }
 
   // Check if it's possibly part of the new segment.
