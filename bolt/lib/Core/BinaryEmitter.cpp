@@ -1196,8 +1196,13 @@ void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
   for (BinarySection &Section : BC.sections()) {
     if (opts::Rewrite) {
       // In rewrite mode, emit all allocatable sections so they appear in the
-      // intermediate object and receive new addresses via JITLink.
+      // intermediate object and receive new addresses via JITLink. Skip
+      // original text sections (those renamed with OrgSecPrefix) since they
+      // are replaced by emitFunctions() — emitting them would cause
+      // BinarySection conflicts in ExecutableFileMemoryManager.
       if (!Section.isAllocatable() || Section.isLinkOnly())
+        continue;
+      if (Section.isText() && Section.getName().starts_with(OrgSecPrefix))
         continue;
     } else if (!Section.hasRelocations()) {
       continue;
