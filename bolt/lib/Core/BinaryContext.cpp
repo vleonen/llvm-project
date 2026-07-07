@@ -1030,8 +1030,8 @@ void BinaryContext::adjustCodePadding() {
     if (!shouldEmit(BF))
       continue;
 
-    if (!hasValidCodePadding(BF)) {
-      if (HasRelocations) {
+      if (!hasValidCodePadding(BF)) {
+        if (HasRelocations && !opts::Rewrite) {
         this->errs() << "BOLT-WARNING: function " << BF
                      << " has invalid padding. Ignoring the function\n";
         BF.setIgnored();

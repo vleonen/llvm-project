@@ -15,6 +15,7 @@
 
 #include "bolt/Core/BinaryContext.h"
 #include "bolt/Core/Linker.h"
+#include "bolt/Core/Relocation.h"
 #include "bolt/Rewrite/MetadataManager.h"
 #include "bolt/Utils/NameResolver.h"
 #include "llvm/MC/StringTableBuilder.h"
@@ -591,6 +592,9 @@ private:
   /// Number of processed to data relocations.  Used to implement the
   /// -max-relocations debugging option.
   uint64_t NumDataRelocations{0};
+
+  /// Saved data-section relocations for rewrite mode (cleared during emit).
+  std::vector<std::pair<std::string, Relocation>> SavedDataRelocations;
 
   /// Number of failed to process relocations.
   uint64_t NumFailedRelocations{0};
