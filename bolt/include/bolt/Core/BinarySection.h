@@ -469,7 +469,11 @@ public:
 
   /// Emit the section as data, possibly with relocations.
   /// Use name \p SectionName for the section during the emission.
-  void emitAsData(MCStreamer &Streamer, const Twine &SectionName) const;
+  /// \p Labels is a sorted list of (offset, symbol) pairs; a label is
+  /// emitted at each offset so that JITLink can resolve cross-section
+  /// references to symbols within this section.
+  void emitAsData(MCStreamer &Streamer, const Twine &SectionName,
+                  ArrayRef<std::pair<uint64_t, MCSymbol *>> Labels = {}) const;
 
   /// Write finalized contents of the section. If OutputSize exceeds the size of
   /// the OutputContents, append zero padding to the stream and return the

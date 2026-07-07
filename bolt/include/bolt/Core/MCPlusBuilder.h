@@ -1792,6 +1792,17 @@ public:
     return 0;
   }
 
+  /// Replace immediate values in PLT entry instructions with relocatable
+  /// symbol references. \p PLTSymbol is the symbol at the GOT entry
+  /// address that the PLT entry references. Returns true if all expected
+  /// instructions (ADRP, ADD/LDR) were patched.
+  virtual bool handlePLTEntry(InstructionIterator Begin, InstructionIterator End,
+                              const MCSymbol *PLTSymbol,
+                              MCContext *Ctx) {
+    llvm_unreachable("not implemented");
+    return false;
+  }
+
   virtual void patchPLTEntryForBTI(BinaryFunction &PLTFunction, MCInst &Call) {
     llvm_unreachable("not implemented");
   }
