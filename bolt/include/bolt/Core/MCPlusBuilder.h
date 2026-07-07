@@ -559,6 +559,10 @@ public:
     return Analysis->isCall(Inst) || isTailCall(Inst);
   }
 
+  /// Return true if the instruction is an indirect call through memory
+  /// (e.g. x86 call *mem). Used to handle linker-relaxed GOTPCRELX calls.
+  virtual bool isCall64m(const MCInst &Inst) const { return false; }
+
   virtual bool isReturn(const MCInst &Inst) const {
     return Analysis->isReturn(Inst);
   }
