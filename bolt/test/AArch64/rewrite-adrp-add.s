@@ -22,6 +22,11 @@
 ## reference the GOT page (0x220000) instead of BSS (0x230000).
 # RUN: llvm-objdump -d --no-show-raw-insn %t.bolt | FileCheck %s
 
+## Also verify with -keep-section-order.
+# RUN: llvm-bolt %t.orig -o %t.bolt.kso -rewrite -keep-section-order
+# RUN: llvm-readelf -SW %t.bolt.kso 2>&1 | FileCheck %s --check-prefix=GOT
+# RUN: llvm-objdump -d --no-show-raw-insn %t.bolt.kso | FileCheck %s
+
 # CHECK: adrp x0, 0x230000
 # CHECK-NEXT: add x0, x0, #0x{{[0-9a-f]+}}
 # CHECK: adrp x1, 0x220000
