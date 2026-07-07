@@ -917,6 +917,8 @@ Error LongJmpPass::runOnFunctions(BinaryContext &BC) {
 
   BC.outs() << "BOLT-INFO: Starting stub-insertion pass\n";
   std::vector<BinaryFunction *> Sorted = BC.getSortedFunctions();
+  llvm::erase_if(Sorted,
+                 [](BinaryFunction *BF) { return BF->isPLTFunction(); });
   bool Modified;
   uint32_t Iterations = 0;
   do {
