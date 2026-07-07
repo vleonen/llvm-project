@@ -1338,10 +1338,19 @@ void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
       if (Section.getOutputSize() == 0)
         continue;
       StringRef SecName = Section.getName();
+      // Skip BOLT-internal address mapping sections that contain special
+      // data the MCStreamer may not be able to serialize.
+      if (SecName.starts_with(".bolt.") || SecName.starts_with(".note."))
+        continue;
+      // Skip .eh_frame — contains CFI data that is handled separately by
+      // BOLT (writeEHFrameHeader) and may have fixups the MCStreamer cannot
+      // serialize properly.
+      if (SecName.contains(".eh_frame"))
+        continue;
       // Skip PLT sections in rewrite mode — PLT entries are emitted as
       // regular functions via emitFunctions(), not as data.
-      if (SecName == ".plt" || SecName == ".plt.got" ||
-          SecName == ".plt.sec" || SecName == ".iplt")
+      if (opts::Rewrite && (SecName == ".plt" || SecName == ".plt.got" ||
+                            SecName == ".plt.sec" || SecName == ".iplt"))
         continue;
     } else if (!Section.hasRelocations()) {
       continue;
@@ -1355,12 +1364,25 @@ void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
             ? OrgSecPrefix
             : "";
 
+    // In -rewrite mode, force all sections to SHT_PROGBITS in the
+    // intermediate object. Sections with special ELF types (SHT_DYNSYM,
+    // SHT_RELA, SHT_HASH, etc.) cause the ELF writer to interpret their
+    // bytes as typed entries, leading to crashes.
+    unsigned OrigType = Section.getELFType();
+    if (opts::Rewrite && OrigType != ELF::SHT_PROGBITS &&
+        OrigType != ELF::SHT_NOBITS)
+      Section.setELFType(ELF::SHT_PROGBITS);
+
     auto LabelIt = SectionLabels.find(&Section);
     auto Labels = LabelIt != SectionLabels.end()
                       ? ArrayRef<std::pair<uint64_t, MCSymbol *>>(LabelIt->second)
                       : ArrayRef<std::pair<uint64_t, MCSymbol *>>();
     Section.emitAsData(Streamer, Prefix + Section.getName(), Labels);
     Section.clearRelocations();
+
+    if (opts::Rewrite && OrigType != ELF::SHT_PROGBITS &&
+        OrigType != ELF::SHT_NOBITS)
+      Section.setELFType(OrigType);
   }
 }
 
