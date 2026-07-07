@@ -1452,6 +1452,21 @@ Error BinaryFunction::disassemble() {
                   })) {
             return Error(std::move(NewE));
           }
+        } else if (opts::Rewrite && BC.isX86() &&
+                   BC.MIB->isCall64m(Instruction)) {
+          // Linker-relaxed GOTPCRELX converted a PC-relative call *GOT(%rip)
+          // into an absolute call *imm. The relocation is still recorded, so
+          // replace the immediate with the symbol reference to keep it
+          // resolvable by JITLink after sections move.
+          if (const Relocation *Rel =
+                  getRelocationInRange(Offset, Offset + Size)) {
+            int64_t Value = Rel->Value;
+            bool Ok = BC.MIB->replaceImmWithSymbolRef(Instruction, Rel->Symbol,
+                                                      Rel->Addend, Ctx.get(),
+                                                      Value, Rel->Type);
+            assert(Ok && "Failed to replace immediate with symbol ref!");
+            (void)Ok;
+          }
         }
 
         if (BC.isAArch64())
