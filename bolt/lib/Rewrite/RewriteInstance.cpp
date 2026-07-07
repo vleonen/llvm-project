@@ -4466,18 +4466,61 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
       MappedSections.insert(&Section);
     }
 
-    // For executable segments, sort sections so that PLT sections come
-    // before .text. This keeps PLT entries within branch range of the
-    // code that calls them, which is important for AArch64 PLT-as-functions
-    // and for LongJmp stub reachability.
-    if (Phdr.isExec()) {
+    // Sort sections to preserve the original binary's section order.
+    // Original sections sort by their original address (matching the ELF's
+    // section layout). New BOLT-created sections are placed near their
+    // counterpart originals by looking up the original section with the
+    // same output name, or by prefix matching (e.g. .text.cold → .text).
+    // PLT sections always come before .text in executable segments to keep
+    // PLT entries within branch range.
+    auto computeSortKey = [&](BinarySection *S) -> uint64_t {
+      // Original section: use its original address.
+      if (S->getAddress())
+        return S->getAddress();
+      // New section with a counterpart original. Match against the internal
+      // name, not the output name: when a new section replaces an original
+      // (e.g. the regenerated .eh_frame), the original is renamed with
+      // OrgSecPrefix via setOutputName() while getName() stays pristine, so
+      // the new section inherits the original's position in the order.
+      StringRef OutName = S->getOutputName();
+      for (BinarySection &Other : BC->allocatableSections()) {
+        if (Other.getAddress() && Other.getName() == OutName)
+          return Other.getAddress() + 1;
+      }
+      // Prefix match: e.g. ".text.cold" → ".text".
+      size_t Dot = OutName.find('.', 1);
+      if (Dot != StringRef::npos) {
+        StringRef Base = OutName.substr(0, Dot);
+        for (BinarySection &Other : BC->allocatableSections()) {
+          if (Other.getAddress() && Other.getName() == Base)
+            return Other.getAddress() + OutName.size();
+        }
+      }
+      // No counterpart found: place at the end.
+      return std::numeric_limits<uint64_t>::max();
+    };
+    // Sort sections to preserve the original binary's section order.
+    // Only applied when -keep-section-order is requested; otherwise the
+    // default insertion order (originals first, then new sections) is used.
+    if (opts::KeepSectionOrder) {
+      llvm::stable_sort(Sections, [&](BinarySection *A, BinarySection *B) {
+        if (Phdr.isExec()) {
+          bool AIsPLT = isPLTSection(A->getOutputName());
+          bool BIsPLT = isPLTSection(B->getOutputName());
+          if (AIsPLT != BIsPLT)
+            return AIsPLT; // PLT sections come first
+        }
+        return computeSortKey(A) < computeSortKey(B);
+      });
+    } else if (Phdr.isExec()) {
+      // Default: PLT-first sorting for exec segments only.
       llvm::stable_sort(Sections, [&isPLTSection](BinarySection *A,
                                                    BinarySection *B) {
-        bool AIsPLT = isPLTSection(A->getName());
-        bool BIsPLT = isPLTSection(B->getName());
+        bool AIsPLT = isPLTSection(A->getOutputName());
+        bool BIsPLT = isPLTSection(B->getOutputName());
         if (AIsPLT != BIsPLT)
-          return AIsPLT; // PLT sections come first
-        return A->getAddress() < B->getAddress(); // Stable by original address
+          return AIsPLT;
+        return A->getAddress() < B->getAddress();
       });
     }
 
