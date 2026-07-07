@@ -292,6 +292,7 @@ public:
   void setRelro() { IsRelro = true; }
   unsigned getELFType() const { return ELFType; }
   unsigned getELFFlags() const { return ELFFlags; }
+  void setELFType(unsigned Type) { ELFType = Type; }
 
   uint8_t *getData() {
     return reinterpret_cast<uint8_t *>(
