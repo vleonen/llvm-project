@@ -274,6 +274,10 @@ private:
   /// Disassemble and create function entries for PLT.
   void disassemblePLT();
 
+  /// In -rewrite mode, create synthetic relocations for .got and .got.plt
+  /// entries so they are correctly patched when sections are relocated.
+  void createGOTPLTRelocations();
+
   /// Auxiliary function to create .plt BinaryFunction on \p EntryAddres
   /// with the \p EntrySize size. \p TargetAddress is the .got entry
   /// associated address.

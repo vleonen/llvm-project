@@ -4427,6 +4427,47 @@ void BinaryFunction::calculateLoopInfo() {
   }
 }
 
+bool BinaryFunction::disassemblePLT(InstructionListType &Instructions) {
+  if (Instructions.empty())
+    return false;
+
+  BC.SymbolicDisAsm->setSymbolizer(BC.MIB->createTargetSymbolizer(*this));
+  Labels[0] = BC.Ctx->createNamedTempSymbol("BB0");
+
+  LLVM_DEBUG(dbgs() << "BOLT-DEBUG: disassemblePLT for " << getPrintName()
+                    << " with " << Instructions.size() << " instructions\n";
+
+             for (auto &Inst
+                  : Instructions) {
+               BC.InstPrinter->printInst(&Inst, 0, "", *BC.STI, dbgs());
+               dbgs() << "\n";
+             });
+
+  bool Handled = BC.MIB->handlePLTEntry(Instructions.begin(), Instructions.end(),
+                              getPLTSymbol(), BC.Ctx.get());
+  LLVM_DEBUG(dbgs() << "BOLT-DEBUG:   handlePLTEntry returned " << Handled
+                    << "\n");
+  if (!Handled) {
+    if (opts::Verbosity)
+      BC.errs() << "BOLT-WARNING: can't handle PLT entry in function "
+                << getPrintName() << " for entry " << getPLTSymbol() << "\n";
+    BC.SymbolicDisAsm->setSymbolizer(nullptr);
+    return false;
+  }
+
+  // Add instructions to the Instructions map. buildCFG (called later
+  // by buildFunctionsCFG) creates basic blocks from this map.
+  updateState(State::Disassembled);
+  uint64_t Offset = 0;
+  for (MCInst &Inst : Instructions) {
+    addInstruction(Offset, std::move(Inst));
+    Offset += 4; // All AArch64 instructions are 4 bytes
+  }
+
+  BC.SymbolicDisAsm->setSymbolizer(nullptr);
+  return true;
+}
+
 void BinaryFunction::updateOutputValues(const BOLTLinker &Linker) {
   if (!isEmitted()) {
     assert(!isInjected() && "injected function should be emitted");
