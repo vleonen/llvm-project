@@ -786,6 +786,20 @@ Error RewriteInstance::run() {
   if (opts::Rewrite)
     finalizeInputSectionsForRewrite();
 
+  // In rewrite mode, clear GOT section relocations so JITLink does not
+  // resolve them. The GOT content is written from original input bytes
+  // and patched by patchELFGOT. JITLink-resolved values would be wrong
+  // because PLT BinaryData output addresses may differ from the final
+  // section layout addresses at the time createGOTPLTRelocations created
+  // the relocations.
+  if (opts::Rewrite) {
+    for (BinarySection &Section : BC->allocatableSections()) {
+      StringRef Name = Section.getName();
+      if (Name == ".got" || Name == ".got.plt")
+        Section.clearRelocations();
+    }
+  }
+
   emitAndLink();
 
   updateMetadata();
@@ -1275,6 +1289,11 @@ void RewriteInstance::discoverFileObjects() {
   // Process PLT section.
   disassemblePLT();
 
+  // In -rewrite mode, create synthetic relocations for GOT entries so they
+  // are correctly patched when sections are relocated to new addresses.
+  if (opts::Rewrite)
+    createGOTPLTRelocations();
+
   // See if we missed any functions marked by FDE.
   for (const auto &FDEI : CFIRdWrt->getFDEs()) {
     const uint64_t Address = FDEI.first;
@@ -1622,11 +1641,12 @@ registerParent:
   }
 }
 
-void RewriteInstance::createPLTBinaryFunction(uint64_t TargetAddress,
-                                              uint64_t EntryAddress,
-                                              uint64_t EntrySize) {
+BinaryFunction *
+RewriteInstance::createPLTBinaryFunction(uint64_t TargetAddress,
+                                         uint64_t EntryAddress,
+                                         uint64_t EntrySize) {
   if (!TargetAddress)
-    return;
+    return nullptr;
 
   auto setPLTSymbol = [&](BinaryFunction *BF, StringRef Name) {
     const unsigned PtrSize = BC->AsmInfo->getCodePointerSize();
@@ -1639,32 +1659,50 @@ void RewriteInstance::createPLTBinaryFunction(uint64_t TargetAddress,
   if (BF && BC->isAArch64()) {
     // Handle IFUNC trampoline with symbol
     setPLTSymbol(BF, BF->getOneName());
-    return;
-  }
-
-  const Relocation *Rel = BC->getDynamicRelocationAt(TargetAddress);
-  if (!Rel)
-    return;
-
-  MCSymbol *Symbol = Rel->Symbol;
-  if (!Symbol) {
-    if (BC->isRISCV() || !Rel->Addend || !Rel->isIRelative())
-      return;
-
-    // IFUNC trampoline without symbol
-    BinaryFunction *TargetBF = BC->getBinaryFunctionAtAddress(Rel->Addend);
-    if (!TargetBF) {
-      BC->errs()
-          << "BOLT-WARNING: Expected BF to be presented as IFUNC resolver at "
-          << Twine::utohexstr(Rel->Addend) << ", skipping\n";
-      return;
-    }
-
-    Symbol = TargetBF->getSymbol();
+    return BF;
   }
 
   ErrorOr<BinarySection &> Section = BC->getSectionForAddress(EntryAddress);
   assert(Section && "cannot get section for address");
+
+  // Resolve the symbol from a dynamic relocation first, or fall back to
+  // reading the GOT slot contents for statically-resolved binaries.
+  MCSymbol *Symbol = nullptr;
+  if (const Relocation *Rel = BC->getDynamicRelocationAt(TargetAddress)) {
+    Symbol = Rel->Symbol;
+    if (!Symbol) {
+      if (BC->isRISCV() || !Rel->Addend || !Rel->isIRelative())
+        return nullptr;
+      BinaryFunction *TargetBF = BC->getBinaryFunctionAtAddress(Rel->Addend);
+      if (!TargetBF) {
+        BC->errs() << "BOLT-WARNING: Expected BF to be presented as IFUNC "
+                      "resolver at "
+                   << Twine::utohexstr(Rel->Addend) << ", skipping\n";
+        return nullptr;
+      }
+      Symbol = TargetBF->getSymbol();
+    }
+  }
+  if (!Symbol) {
+    if (auto Addr = BC->getUnsignedValueAtAddress(TargetAddress,
+                                                  sizeof(uint64_t))) {
+      if (BinaryData *Data = BC->getBinaryDataAtAddress(*Addr))
+        Symbol = Data->getSymbol();
+    }
+  }
+
+  if (!Symbol) {
+    if (EntryAddress == Section->getAddress()) {
+      if (!BF)
+        BF = BC->createBinaryFunction(
+            "__BOLT_PSEUDO_" + Section->getName().str(), *Section, EntryAddress,
+            0, EntrySize, Section->getAlignment());
+      BF->setPLTSymbol(BC->getOrCreateGlobalSymbol(TargetAddress, "DATAat"));
+      return BF;
+    }
+    return nullptr;
+  }
+
   if (!BF)
     BF = BC->createBinaryFunction(Symbol->getName().str() + "@PLT", *Section,
                                   EntryAddress, 0, EntrySize,
@@ -1672,6 +1710,7 @@ void RewriteInstance::createPLTBinaryFunction(uint64_t TargetAddress,
   else
     BF->addAlternativeName(Symbol->getName().str() + "@PLT");
   setPLTSymbol(BF, Symbol->getName());
+  return BF;
 }
 
 void RewriteInstance::disassemblePLTInstruction(const BinarySection &Section,
@@ -1706,35 +1745,30 @@ void RewriteInstance::disassemblePLTSectionAArch64(BinarySection &Section) {
     MCInst Instruction;
     uint64_t EntryOffset = InstrOffset;
     uint64_t EntrySize = 0;
-    uint64_t InstrSize;
+    uint64_t TargetAddress = 0;
+    const uint64_t EntryAddress = SectionAddress + EntryOffset;
     // Loop through entry instructions
     while (InstrOffset < SectionSize) {
+      uint64_t InstrSize;
       disassemblePLTInstruction(Section, InstrOffset, Instruction, InstrSize);
+      if (TargetAddress && !BC->MIB->isNoop(Instruction))
+        break;
       EntrySize += InstrSize;
-      if (!BC->MIB->isIndirectBranch(Instruction)) {
-        Instructions.emplace_back(Instruction);
-        InstrOffset += InstrSize;
-        continue;
+      if (BC->MIB->isIndirectBranch(Instruction)) {
+        TargetAddress = BC->MIB->analyzePLTEntry(
+            Instruction, Instructions.begin(), Instructions.end(),
+            EntryAddress);
       }
-
-      const uint64_t EntryAddress = SectionAddress + EntryOffset;
-      const uint64_t TargetAddress = BC->MIB->analyzePLTEntry(
-          Instruction, Instructions.begin(), Instructions.end(), EntryAddress);
-
-      createPLTBinaryFunction(TargetAddress, EntryAddress, EntrySize);
-      break;
+      Instructions.emplace_back(Instruction);
+      InstrOffset += InstrSize;
     }
 
-    // Branch instruction
-    InstrOffset += InstrSize;
+    createPLTBinaryFunction(TargetAddress, EntryAddress, EntrySize);
 
-    // Skip nops if any
-    while (InstrOffset < SectionSize) {
-      disassemblePLTInstruction(Section, InstrOffset, Instruction, InstrSize);
-      if (!BC->MIB->isNoop(Instruction))
-        break;
-
-      InstrOffset += InstrSize;
+    if (opts::Rewrite) {
+      BinaryFunction *BF = BC->getBinaryFunctionAtAddress(EntryAddress);
+      if (BF && BF->disassemblePLT(Instructions))
+        BF->setPseudo(false);
     }
   }
 }
@@ -1791,8 +1825,10 @@ void RewriteInstance::disassemblePLTSectionX86(BinarySection &Section,
 
   for (uint64_t EntryOffset = 0; EntryOffset + EntrySize <= SectionSize;
        EntryOffset += EntrySize) {
+    InstructionListType Instructions;
     MCInst Instruction;
     uint64_t InstrSize, InstrOffset = EntryOffset;
+    uint64_t TargetAddress = 0;
     while (InstrOffset < EntryOffset + EntrySize) {
       disassemblePLTInstruction(Section, InstrOffset, Instruction, InstrSize);
       // Check if the entry size needs adjustment.
@@ -1800,26 +1836,80 @@ void RewriteInstance::disassemblePLTSectionX86(BinarySection &Section,
           EntrySize == 8)
         EntrySize = 16;
 
-      if (BC->MIB->isIndirectBranch(Instruction))
-        break;
+      // Evaluate the GOT target at the indirect branch.
+      if (BC->MIB->isIndirectBranch(Instruction)) {
+        if (!BC->MIB->evaluateMemOperandTarget(
+                Instruction, TargetAddress, SectionAddress + InstrOffset,
+                InstrSize)) {
+          BC->errs() << "BOLT-ERROR: error evaluating PLT instruction at "
+                        "offset 0x"
+                     << Twine::utohexstr(SectionAddress + InstrOffset) << '\n';
+          exit(1);
+        }
+        if (!opts::Rewrite)
+          break;
+      }
+
+      if (opts::Rewrite) {
+        BC->MIB->setSize(Instruction, InstrSize);
+        Instructions.emplace_back(Instruction);
+      }
 
       InstrOffset += InstrSize;
     }
 
-    if (InstrOffset + InstrSize > EntryOffset + EntrySize)
+    if (!TargetAddress)
       continue;
 
-    uint64_t TargetAddress;
-    if (!BC->MIB->evaluateMemOperandTarget(Instruction, TargetAddress,
-                                           SectionAddress + InstrOffset,
-                                           InstrSize)) {
-      BC->errs() << "BOLT-ERROR: error evaluating PLT instruction at offset 0x"
-                 << Twine::utohexstr(SectionAddress + InstrOffset) << '\n';
-      exit(1);
-    }
+    // Skip malformed entries (non-rewrite sanity check).
+    if (!opts::Rewrite && InstrOffset + InstrSize > EntryOffset + EntrySize)
+      continue;
 
-    createPLTBinaryFunction(TargetAddress, SectionAddress + EntryOffset,
-                            EntrySize);
+    BinaryFunction *BF = createPLTBinaryFunction(
+        TargetAddress, SectionAddress + EntryOffset, EntrySize);
+
+    // In rewrite mode, disassemble the entry body so it can be emitted as a
+    // function with retargeted GOT references (handlePLTEntry).
+    if (opts::Rewrite && BF && !Instructions.empty() &&
+        BF->disassemblePLT(Instructions))
+      BF->setPseudo(false);
+  }
+}
+
+void RewriteInstance::createGOTPLTRelocations() {
+  const unsigned PtrSize = BC->AsmInfo->getCodePointerSize();
+
+  auto processGOTSection = [&](BinarySection &Section, bool IsGotPlt) {
+    const uint64_t SectionAddress = Section.getAddress();
+    StringRef Contents = Section.getContents();
+    LLVM_DEBUG(dbgs() << "BOLT-DEBUG: processing " << Section.getName()
+                      << " for GOT/PLT relocations\n");
+
+    for (uint64_t Offset = 0; Offset + PtrSize <= Contents.size();
+         Offset += PtrSize) {
+      uint64_t Value;
+      memcpy(&Value, Contents.data() + Offset, PtrSize);
+      if (Value == 0 || Value == ~0ULL)
+        continue;
+
+      MCSymbol *Sym = BC->getOrCreateGlobalSymbol(Value, "SYMBOLat");
+      Section.addRelocation(Offset, Sym, Relocation::getAbs64(), 0);
+
+      if ((BC->isAArch64() || BC->isRISCV()) && !IsGotPlt) {
+        if (BinaryData *BD = BC->getBinaryDataAtAddress(Value)) {
+          for (MCSymbol *S : BD->getSymbols())
+            BC->GOTSymbolsByName[S->getName()] = SectionAddress + Offset;
+        }
+      }
+    }
+  };
+
+  for (BinarySection &Section : BC->allocatableSections()) {
+    StringRef Name = Section.getName();
+    if (Name == ".got")
+      processGOTSection(Section, /*IsGotPlt=*/false);
+    else if (Name == ".got.plt")
+      processGOTSection(Section, /*IsGotPlt=*/true);
   }
 }
 
@@ -1851,8 +1941,10 @@ void RewriteInstance::disassemblePLT() {
       PltBF = BC->createBinaryFunction(
           "__BOLT_PSEUDO_" + Section.getName().str(), Section,
           Section.getAddress(), 0, PLTSI->EntrySize, Section.getAlignment());
+      PltBF->setSimple(false);
     }
-    PltBF->setPseudo(true);
+    if (!opts::Rewrite)
+      PltBF->setPseudo(true);
   }
 }
 
@@ -3449,6 +3541,11 @@ void RewriteInstance::disassembleFunctions() {
                  << "empty for function " << Function << '\n';
       exit(1);
     }
+
+    // Skip functions already processed (e.g. PLT functions populated by
+    // disassemblePLTSectionAArch64 in -rewrite mode).
+    if (Function.isPLTFunction() && opts::Rewrite)
+      continue;
 
     // Treat zero-sized functions as non-simple ones.
     if (Function.getSize() == 0) {

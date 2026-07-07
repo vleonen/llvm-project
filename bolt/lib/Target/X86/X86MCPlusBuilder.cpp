@@ -729,6 +729,32 @@ public:
     return true;
   }
 
+  /// Retarget RIP-relative memory operands in an x86 PLT entry to the GOT
+  /// entry symbol (PLTSymbol) so the displacement is recomputed by JITLink.
+  bool handlePLTEntry(InstructionIterator Begin, InstructionIterator End,
+                      const MCSymbol *PLTSymbol,
+                      MCContext *Ctx) override {
+    int Count = 0;
+    for (auto I = Begin; I != End; ++I) {
+      int MemOpNo = getMemoryOperandNo(*I);
+      if (MemOpNo < 0)
+        continue;
+      unsigned DispOp = static_cast<unsigned>(MemOpNo + X86::AddrDisp);
+      if (DispOp >= I->getNumOperands())
+        continue;
+      MCOperand &Disp = I->getOperand(DispOp);
+      if (Disp.isExpr())
+        continue;
+      if (!Disp.isImm())
+        continue;
+      int64_t Val;
+      if (setOperandToSymbolRef(*I, DispOp, PLTSymbol, /*Addend=*/0, Ctx,
+                                ELF::R_X86_64_PC32))
+        ++Count;
+    }
+    return Count > 0;
+  }
+
   /// Get the registers used as function parameters.
   /// This function is specific to the x86_64 abi on Linux.
   BitVector getRegsUsedAsParams() const override {

@@ -1287,6 +1287,12 @@ public:
     IsPseudo = true;
   }
 
+  /// Disassemble PLT entry instructions and retarget GOT references to
+  /// relocatable symbol references via handlePLTEntry. Used in -rewrite
+  /// mode to emit PLT entries through the MCStreamer pipeline.
+  /// Returns true if the PLT entry was successfully processed.
+  bool disassemblePLT(InstructionListType &Instructions);
+
   /// Update output values of the function based on the final \p Layout.
   void updateOutputValues(const BOLTLinker &Linker);
 
@@ -1662,6 +1668,10 @@ public:
       --I;
       Offset = I->first;
     }
+    // PLT functions may be covered by an FDE that spans multiple PLT entries.
+    // Skip CFI that falls outside the function's instruction range.
+    if (isPLTFunction() && I->first != Offset)
+      return;
     assert(I->first == Offset && "CFI pointing to unknown instruction");
     // When dealing with RememberState, we place this CFI in FrameInstructions.
     // We want to ensure RememberState and RestoreState CFIs are in the same
