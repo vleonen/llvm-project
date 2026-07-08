@@ -274,11 +274,17 @@ private:
   /// Disassemble and create function entries for PLT.
   void disassemblePLT();
 
+  /// In -rewrite mode, create synthetic relocations for .got and .got.plt
+  /// entries so they are correctly patched when sections are relocated.
+  void createGOTPLTRelocations();
+
   /// Auxiliary function to create .plt BinaryFunction on \p EntryAddres
   /// with the \p EntrySize size. \p TargetAddress is the .got entry
-  /// associated address.
-  void createPLTBinaryFunction(uint64_t TargetAddress, uint64_t EntryAddress,
-                               uint64_t EntrySize);
+  /// associated address. Returns the created (or pre-existing) function, or
+  /// nullptr if the entry could not be resolved to a symbol.
+  BinaryFunction *createPLTBinaryFunction(uint64_t TargetAddress,
+                                          uint64_t EntryAddress,
+                                          uint64_t EntrySize);
 
   /// Disassemble PLT instruction.
   void disassemblePLTInstruction(const BinarySection &Section,
