@@ -1609,6 +1609,13 @@ public:
   /// Return true if the function should be emitted to the output file.
   bool shouldEmit(const BinaryFunction &Function) const;
 
+  /// Return true if the function's code survives -rewrite relocation: it will
+  /// be emitted into the new .text, carried along with its fold parent, or
+  /// preserved by a verbatim section copy (.plt/.init/.fini). Only meaningful
+  /// in -rewrite mode, where the main code section is fully replaced by
+  /// emitted functions.
+  bool isMovable(const BinaryFunction &Function) const;
+
   /// Dump the assembly representation of MCInst to debug output.
   void dump(const MCInst &Inst) const;
 

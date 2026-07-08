@@ -1169,7 +1169,7 @@ void BinaryContext::adjustCodePadding() {
 
     if (!hasValidCodePadding(BF)) {
       NumInvalid++;
-      if (HasRelocations) {
+      if (HasRelocations && !opts::Rewrite) {
         this->errs() << "BOLT-WARNING: function " << BF
                      << " has invalid padding. Ignoring the function\n";
         BF.setIgnored();
@@ -1502,7 +1502,7 @@ void BinaryContext::processInterproceduralReferences() {
     if (isAArch64() && handleAArch64Veneer(Address))
       continue;
 
-    if (opts::processAllFunctions()) {
+    if (opts::processAllFunctions() || opts::Rewrite) {
       this->errs() << "BOLT-ERROR: cannot process binaries with unmarked "
                    << "object in code at address 0x"
                    << Twine::utohexstr(Address) << " belonging to section "
@@ -1998,6 +1998,21 @@ bool BinaryContext::shouldEmit(const BinaryFunction &Function) const {
   // In relocation mode we will emit non-simple functions with CFG.
   // If the function does not have a CFG it should be marked as ignored.
   return HasRelocations || Function.isSimple();
+}
+
+bool BinaryContext::isMovable(const BinaryFunction &Function) const {
+  // Pseudo functions carry no code of their own, folded functions are emitted
+  // together with the parent, and zero-sized functions have no code to lose.
+  if (Function.isPseudo() || Function.isFolded() || Function.getSize() == 0)
+    return true;
+
+  // Functions living outside the main code section survive the rewrite: their
+  // sections (.plt/.init/.fini and similar) are copied verbatim to the output.
+  auto Origin = Function.getOriginSectionName();
+  if (!Origin || *Origin != getMainCodeSectionName())
+    return true;
+
+  return shouldEmit(Function);
 }
 
 void BinaryContext::dump(const MCInst &Inst) const {
