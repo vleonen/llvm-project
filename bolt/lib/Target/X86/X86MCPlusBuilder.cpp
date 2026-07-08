@@ -768,6 +768,42 @@ public:
     return true;
   }
 
+  /// Retarget RIP-relative memory operands in an x86 PLT entry to the GOT
+  /// entry symbol (\p PLTSymbol) so the displacement is recomputed by JITLink
+  /// against the relocated GOT. Unlike AArch64, which patches instruction
+  /// immediates (ADRP/ADD/LDR), x86 PLT entries reference the GOT through a
+  /// single memory operand (e.g. jmp *GOT(%rip)), so we retarget the memory
+  /// operand's displacement slot.
+  ///
+  /// Memory operands already carrying an MCExpr displacement (pre-retargeted
+  /// by the caller, e.g. for PLT0's distinct GOT+8 / GOT+16 references) are
+  /// left untouched.
+  bool handlePLTEntry(InstructionIterator Begin, InstructionIterator End,
+                      const MCSymbol *PLTSymbol,
+                      MCContext *Ctx) override {
+    int Count = 0;
+    for (auto I = Begin; I != End; ++I) {
+      int MemOpNo = getMemoryOperandNo(*I);
+      if (MemOpNo < 0)
+        continue;
+      unsigned DispOp = static_cast<unsigned>(MemOpNo + X86::AddrDisp);
+      if (DispOp >= I->getNumOperands())
+        continue;
+      MCOperand &Disp = I->getOperand(DispOp);
+      // Skip already-symbolic displacements (e.g. PLT0 per-ref retargeting).
+      if (Disp.isExpr())
+        continue;
+      // Only retarget raw immediate displacements (the common case).
+      if (!Disp.isImm())
+        continue;
+      int64_t Val;
+      if (setOperandToSymbolRef(*I, DispOp, PLTSymbol, /*Addend=*/0, Ctx,
+                                ELF::R_X86_64_PC32))
+        ++Count;
+    }
+    return Count > 0;
+  }
+
   /// Get the registers used as function parameters.
   /// This function is specific to the x86_64 abi on Linux.
   BitVector getRegsUsedAsParams() const override {

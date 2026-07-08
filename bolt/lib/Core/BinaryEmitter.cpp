@@ -293,8 +293,46 @@ void BinaryEmitter::emitFunctions() {
     Streamer.emitLabel(BC.getHotTextStartSymbol());
   }
 
-  // Emit functions in sorted order.
+  // Emit PLT entries as regular functions in -rewrite mode. PLT entries
+  // are emitted to their original sections with retargeted GOT references,
+  // eliminating the need for post-link byte patching. GOT entry symbols
+  // emitted as labels in emitDataSections enable JITLink to resolve
+  // cross-references from PLT to GOT.
+  if (opts::Rewrite) {
+    SmallVector<BinaryFunction *, 16> PLTFunctions;
+    for (auto &BFI : BC.getBinaryFunctions()) {
+      BinaryFunction *BF = &BFI.second;
+      if (BF->isPLTFunction() && !BF->isPseudo())
+        PLTFunctions.push_back(BF);
+    }
+    llvm::sort(PLTFunctions, [](BinaryFunction *A, BinaryFunction *B) {
+      return A->getAddress() < B->getAddress();
+    });
+    const bool OriginalAllowAutoPadding = Streamer.getAllowAutoPadding();
+    for (BinaryFunction *BF : PLTFunctions) {
+      MCSection *Section =
+          BC.getCodeSection(BF->getOriginSection()->getName());
+      Streamer.switchSection(Section);
+      Section->setAlignment(Align(BF->getOriginSection()->getAlignment()));
+      Section->setHasInstructions(true);
+      // Emit the function entry label so JITLink can resolve
+      // cross-section BL references (e.g. bl __libc_start_main@plt).
+      Streamer.emitLabel(BF->getSymbol());
+      for (auto &BB : *BF) {
+        for (MCInst &Inst : BB)
+          Streamer.emitInstruction(Inst, *BC.STI);
+      }
+      BF->setEmitted(/*KeepCFG=*/false);
+    }
+    Streamer.setAllowAutoPadding(OriginalAllowAutoPadding);
+  }
+
+  // Emit functions in sorted order, excluding PLT functions in rewrite mode.
   std::vector<BinaryFunction *> SortedFunctions = BC.getSortedFunctions();
+  if (opts::Rewrite) {
+    llvm::erase_if(SortedFunctions,
+                   [](BinaryFunction *BF) { return BF->isPLTFunction(); });
+  }
   emit(SortedFunctions);
 
   // Emit functions added by BOLT.
@@ -1203,6 +1241,85 @@ void BinaryEmitter::emitDebugLineInfoForUnprocessedCUs() {
 }
 
 void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
+  // Collect PLT target symbols that need labels in data sections. These
+  // labels enable JITLink to resolve PLT→GOT cross-references.
+  DenseMap<const BinarySection *, SmallVector<std::pair<uint64_t, MCSymbol *>>>
+      SectionLabels;
+  if (opts::Rewrite) {
+    int TotalPLT = 0, NonPseudoPLT = 0;
+    for (auto &BFI : BC.getBinaryFunctions()) {
+      BinaryFunction &BF = BFI.second;
+      if (!BF.isPLTFunction())
+        continue;
+      TotalPLT++;
+      if (BF.isPseudo())
+        continue;
+      NonPseudoPLT++;
+      const MCSymbol *PLTSym = BF.getPLTSymbol();
+      if (!PLTSym || PLTSym->getName().empty())
+        continue;
+      // Look up the GOT entry address from BinaryData
+      if (BinaryData *BD = BC.getBinaryDataByName(PLTSym->getName())) {
+        ErrorOr<BinarySection &> Sec =
+            BC.getSectionForAddress(BD->getAddress());
+        if (Sec) {
+          uint64_t Offset = BD->getAddress() - Sec->getAddress();
+          SectionLabels[&*Sec].push_back(
+              {Offset, const_cast<MCSymbol *>(PLTSym)});
+        } else {
+          LLVM_DEBUG(dbgs() << "BOLT-DEBUG: no section for PLT symbol "
+                           << PLTSym->getName() << " at 0x"
+                           << Twine::utohexstr(BD->getAddress()) << "\n");
+        }
+      }
+    }
+    LLVM_DEBUG(
+        dbgs() << "BOLT-DEBUG: PLT functions: " << TotalPLT
+               << " total, " << NonPseudoPLT << " non-pseudo\n";
+        dbgs() << "BOLT-DEBUG: collected labels for "
+               << SectionLabels.size() << " sections\n";
+        for (auto &KV : SectionLabels) {
+          dbgs() << "BOLT-DEBUG: section " << KV.first->getName()
+                 << " has " << KV.second.size() << " labels\n";
+        });
+
+    // Also collect any remaining named BinaryData symbols located in the .got
+    // section that were not already emitted as PLT labels above. Emitting them
+    // as labels lets JITLink resolve references to those GOT entries. These
+    // BinaryData may not have their section set, so iterate by address range
+    // within the GOT section.
+    DenseSet<MCSymbol *> EmittedSymbols;
+    for (auto &KV : SectionLabels)
+      for (auto &Label : KV.second)
+        EmittedSymbols.insert(Label.second);
+
+    for (BinarySection &GOTSec : BC.sections()) {
+      if (GOTSec.getName() != ".got")
+        continue;
+      const uint64_t GOTStart = GOTSec.getAddress();
+      const uint64_t GOTEnd = GOTStart + GOTSec.getSize();
+      for (auto &KV : BC.getBinaryData()) {
+        BinaryData &BD = *KV.second;
+        if (BD.getAddress() < GOTStart || BD.getAddress() >= GOTEnd)
+          continue;
+        if (BD.getSymbols().empty())
+          continue;
+        for (MCSymbol *Sym : BD.getSymbols()) {
+          if (Sym->getName().empty() || Sym->isTemporary())
+            continue;
+          if (EmittedSymbols.count(Sym))
+            continue;
+          SectionLabels[&GOTSec].push_back(
+              {BD.getAddress() - GOTStart, Sym});
+          EmittedSymbols.insert(Sym);
+        }
+      }
+    }
+
+    for (auto &KV : SectionLabels)
+      llvm::sort(KV.second);
+  }
+
   for (BinarySection &Section : BC.sections()) {
     if (opts::Rewrite) {
       // In rewrite mode, emit all allocatable sections so they appear in the
@@ -1210,13 +1327,16 @@ void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
       if (!Section.isAllocatable() || Section.isLinkOnly())
         continue;
       // Skip BOLT-internal sections (OrgSecPrefix = renamed originals).
-      // Original text is replaced by emitFunctions(). Original data sections
-      // are emitted under their original names (OrgSecPrefix is NOT applied
-      // to non-renamed sections below).
       if (Section.getName().starts_with(OrgSecPrefix))
         continue;
       // Skip empty BOLT-created sections (e.g. .bolt.new.rodata with size 0).
       if (Section.getOutputSize() == 0)
+        continue;
+      StringRef SecName = Section.getName();
+      // Skip PLT sections in rewrite mode — PLT entries are emitted as
+      // regular functions via emitFunctions(), not as data.
+      if (SecName == ".plt" || SecName == ".plt.got" ||
+          SecName == ".plt.sec" || SecName == ".iplt")
         continue;
     } else if (!Section.hasRelocations()) {
       continue;
@@ -1229,7 +1349,12 @@ void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
         (Section.hasSectionRef() && !Section.getName().starts_with(OrgSecPrefix))
             ? OrgSecPrefix
             : "";
-    Section.emitAsData(Streamer, Prefix + Section.getName());
+
+    auto LabelIt = SectionLabels.find(&Section);
+    auto Labels = LabelIt != SectionLabels.end()
+                      ? ArrayRef<std::pair<uint64_t, MCSymbol *>>(LabelIt->second)
+                      : ArrayRef<std::pair<uint64_t, MCSymbol *>>();
+    Section.emitAsData(Streamer, Prefix + Section.getName(), Labels);
     Section.clearRelocations();
   }
 }
