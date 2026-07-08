@@ -292,6 +292,7 @@ public:
   void setRelro() { IsRelro = true; }
   unsigned getELFType() const { return ELFType; }
   unsigned getELFFlags() const { return ELFFlags; }
+  void setELFType(unsigned Type) { ELFType = Type; }
 
   uint8_t *getData() {
     return reinterpret_cast<uint8_t *>(
@@ -503,6 +504,14 @@ public:
 
   /// When writing section contents, add \p PaddingSize zero bytes at the end.
   void addPadding(uint64_t PaddingSize) { OutputSize += PaddingSize; }
+
+  /// Grow the output size without changing the contents: the extra tail is
+  /// zero-filled in the output file. Unlike updateContents(), this never
+  /// extends OutputContents past its underlying buffer.
+  void setOutputSize(size_t NewSize) {
+    assert(NewSize >= OutputSize && "shrinking output size not supported");
+    OutputSize = NewSize;
+  }
 
   /// Reorder the contents of this section according to /p Order.  If
   /// /p Inplace is true, the entire contents of the section is reordered,
