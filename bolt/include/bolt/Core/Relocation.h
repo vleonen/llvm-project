@@ -131,6 +131,11 @@ public:
   /// Return true if relocation type is for thread local storage.
   static bool isTLS(uint32_t Type);
 
+  /// Return true if the relocation is a descriptor-based TLS access
+  /// (R_AARCH64_TLSDESC_*). Distinct from isTLS(): TLSIE/TLSLE use ordinary
+  /// GOT slots, while TLSDESC references a per-variable descriptor.
+  static bool isTLSDESC(uint32_t Type);
+
   /// Return true of relocation type is for referencing a specific instruction
   /// (as opposed to a function, basic block, etc).
   static bool isInstructionReference(uint32_t Type);

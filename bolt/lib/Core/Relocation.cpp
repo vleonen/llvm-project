@@ -877,6 +877,19 @@ bool Relocation::isTLS(uint32_t Type) {
   }
 }
 
+bool Relocation::isTLSDESC(uint32_t Type) {
+  switch (Type) {
+  default:
+    return false;
+  case ELF::R_AARCH64_TLSDESC_ADR_PREL21:
+  case ELF::R_AARCH64_TLSDESC_ADR_PAGE21:
+  case ELF::R_AARCH64_TLSDESC_LD64_LO12:
+  case ELF::R_AARCH64_TLSDESC_ADD_LO12:
+  case ELF::R_AARCH64_TLSDESC_CALL:
+    return true;
+  }
+}
+
 bool Relocation::isInstructionReference(uint32_t Type) {
   if (Arch != Triple::riscv64)
     return false;

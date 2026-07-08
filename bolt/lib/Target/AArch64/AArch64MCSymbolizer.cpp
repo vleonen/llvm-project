@@ -150,7 +150,11 @@ AArch64MCSymbolizer::adjustRelocation(const Relocation &Rel,
   // For instructions that reference GOT, ignore the referenced symbol and
   // use value at the relocation site. FixRelaxationPass will look at
   // instruction pairs and will perform necessary adjustments.
-  AdjustedRel.Symbol = BC.registerNameAtAddress("__BOLT_got_zero", 0, 0, 0);
+  // TLSDESC descriptor references get a distinct marker so the pass can
+  // route them separately from ordinary .got slots.
+  const char *GOTName = Relocation::isTLSDESC(Rel.Type) ? "__BOLT_tlsdesc_zero"
+                                                        : "__BOLT_got_zero";
+  AdjustedRel.Symbol = BC.registerNameAtAddress(GOTName, 0, 0, 0);
   AdjustedRel.Addend = Rel.Value;
 
   return AdjustedRel;
