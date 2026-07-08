@@ -611,6 +611,20 @@ Error RewriteInstance::discoverStorage() {
   NewTextSegmentOffset = NextAvailableOffset;
   BC->LayoutStartAddress = NextAvailableAddress;
 
+  // In -rewrite mode, the layout starts right after the PHDR table at
+  // offset 0x40. Set LayoutStartAddress so passes (e.g. LongJmp) are aware.
+  if (opts::Rewrite) {
+    unsigned RewritePhnum = 1; // PT_PHDR
+    for (const ProgramHeader &Phdr : BC->InputSegments)
+      if (Phdr.p_type != ELF::PT_PHDR)
+        ++RewritePhnum;
+    BC->MaxPHDRSize = RewritePhnum * sizeof(ELF64LEPhdrTy);
+    BC->LayoutStartAddress =
+        BC->FirstAllocAddress + 0x40 + BC->MaxPHDRSize;
+    PHDRTableOffset = 0x40;
+    PHDRTableAddress = BC->FirstAllocAddress + 0x40;
+  }
+
   // Tools such as objcopy can strip section contents but leave header
   // entries. Check that at least .text is mapped in the file.
   if (!getFileOffsetForAddress(BC->OldTextSectionAddress))
@@ -3358,8 +3372,19 @@ void RewriteInstance::emitAndLink() {
                      TimerGroupDesc, opts::TimeRewrite);
 
   if (opts::Rewrite) {
-    errs() << "BOLT-ERROR: -rewrite mode is not yet implemented\n";
-    exit(1);
+    // Defensive bail: dynamic binaries require .dynamic and .eh_frame_hdr
+    // patching which is not yet implemented in -rewrite mode.
+    bool HasDynamic = false;
+    for (const ProgramHeader &Phdr : BC->InputSegments)
+      if (Phdr.p_type == ELF::PT_DYNAMIC) {
+        HasDynamic = true;
+        break;
+      }
+    if (HasDynamic) {
+      errs() << "BOLT-ERROR: -rewrite does not yet support dynamic binaries"
+                   " (.dynamic / .eh_frame_hdr patching pending)\n";
+      exit(1);
+    }
   }
 
   SmallString<0> ObjectBuffer;
@@ -3481,6 +3506,165 @@ void RewriteInstance::updateMetadata() {
     addBoltInfoSection();
 }
 
+void RewriteInstance::mapLoadableSegmentsRewrite(
+    BOLTLinker::SectionMapper MapSection) {
+  const uint64_t BaseAddress = BC->FirstAllocAddress;
+
+  // Place PHDR table at default offset 0x40 in the file.
+  PHDRTableOffset = 0x40;
+  PHDRTableAddress = BaseAddress + PHDRTableOffset;
+
+  // Count output program headers: PT_PHDR + one per input segment (excluding
+  // PT_PHDR which we create ourselves).
+  unsigned Phnum = 1; // PT_PHDR
+  for (const ProgramHeader &Phdr : BC->InputSegments)
+    if (Phdr.p_type != ELF::PT_PHDR)
+      ++Phnum;
+
+  BC->MaxPHDRSize = Phnum * sizeof(ELF64LE::Phdr);
+  NextAvailableAddress = BaseAddress + PHDRTableOffset + BC->MaxPHDRSize;
+  uint64_t NextAvailableOffset = PHDRTableOffset + BC->MaxPHDRSize;
+
+  // Record PHDR address-to-offset mapping.
+  BC->OutputAddressToOffsetMap[PHDRTableAddress] = PHDRTableOffset;
+
+  // Create PT_PHDR entry.
+  BC->OutputSegments.emplace_back(ELF::PT_PHDR, ELF::PF_R, PHDRTableOffset,
+                                  PHDRTableAddress, PHDRTableAddress,
+                                  BC->MaxPHDRSize, BC->MaxPHDRSize, 0x8);
+
+  // Iterate input PT_LOAD segments and repack their sections.
+  bool IsFirstLoad = true;
+  for (const ProgramHeader &Phdr : BC->InputSegments) {
+    if (!Phdr.isLOAD())
+      continue;
+
+    const uint64_t Align = Phdr.p_align;
+    NextAvailableAddress = alignTo(NextAvailableAddress, Align);
+    NextAvailableOffset = alignTo(NextAvailableOffset, Align);
+
+    // The first LOAD segment must start at offset 0 / base address so the
+    // ELF header and PHDR table are part of its file image, as expected by
+    // the loader.
+    if (IsFirstLoad) {
+      NextAvailableAddress = BaseAddress;
+      NextAvailableOffset = 0;
+      IsFirstLoad = false;
+    }
+
+    const uint64_t SegmentStartAddress = NextAvailableAddress;
+    const uint64_t SegmentStartOffset = NextAvailableOffset;
+    uint64_t FileSize = 0;
+    uint64_t MemSize = 0;
+
+    // Collect sections that belong to this segment (by original address range).
+    // Separate NOBITS sections to place them at the end.
+    std::vector<BinarySection *> Sections;
+    std::vector<BinarySection *> NobitsSections;
+    for (BinarySection &Section : BC->allocatableSections()) {
+      if (Section.isLinkOnly() || !Section.hasValidSectionID())
+        continue;
+      if (!Phdr.contains(Section))
+        continue;
+      if (Section.isBSS())
+        NobitsSections.push_back(&Section);
+      else
+        Sections.push_back(&Section);
+    }
+
+    // Also collect new BOLT-created sections matching this segment's flags.
+    const unsigned SegFlags = Phdr.getSectionFlags();
+    for (BinarySection &Section : BC->allocatableSections()) {
+      if (Section.isLinkOnly() || !Section.hasValidSectionID())
+        continue;
+      if (Section.hasSectionRef())
+        continue; // Already handled above
+      if ((Section.getELFFlags() & SegFlags) != SegFlags)
+        continue;
+      if (Section.isBSS())
+        NobitsSections.push_back(&Section);
+      else
+        Sections.push_back(&Section);
+    }
+
+    // Map file-backed sections.
+    for (BinarySection *Section : Sections) {
+      const uint64_t Alignment = Section->getAlignment();
+      NextAvailableAddress = alignTo(NextAvailableAddress, Alignment);
+      NextAvailableOffset = alignTo(NextAvailableOffset, Alignment);
+
+      const uint64_t Size = Section->getOutputSize();
+      Section->setOutputAddress(NextAvailableAddress);
+      Section->setOutputFileOffset(NextAvailableOffset);
+      BC->OutputAddressToOffsetMap[NextAvailableAddress] = NextAvailableOffset;
+      MapSection(*Section, NextAvailableAddress);
+
+      NextAvailableAddress += Size;
+      NextAvailableOffset += Size;
+      FileSize += Size;
+      MemSize += Size;
+    }
+
+    // Map NOBITS sections at the end (memory only, no file space).
+    for (BinarySection *Section : NobitsSections) {
+      const uint64_t Alignment = Section->getAlignment();
+      NextAvailableAddress = alignTo(NextAvailableAddress, Alignment);
+
+      const uint64_t Size = Section->getOutputSize();
+      Section->setOutputAddress(NextAvailableAddress);
+      Section->setOutputFileOffset(NextAvailableOffset);
+      BC->OutputAddressToOffsetMap[NextAvailableAddress] = NextAvailableOffset;
+      MapSection(*Section, NextAvailableAddress);
+
+      NextAvailableAddress += Size;
+      MemSize += Size;
+      // Don't advance NextAvailableOffset or FileSize for NOBITS.
+    }
+
+    // Create output PT_LOAD segment.
+    BC->OutputSegments.emplace_back(
+        ELF::PT_LOAD, Phdr.p_flags, SegmentStartOffset, SegmentStartAddress,
+        SegmentStartAddress, FileSize, MemSize, Align);
+  }
+
+  // Handle non-LOAD segments (PT_GNU_STACK, PT_INTERP, etc.).
+  for (const ProgramHeader &Phdr : BC->InputSegments) {
+    if (Phdr.isLOAD() || Phdr.p_type == ELF::PT_PHDR)
+      continue;
+
+    if (Phdr.p_type == ELF::PT_GNU_STACK) {
+      // PT_GNU_STACK has no sections, just copy flags.
+      BC->OutputSegments.emplace_back(Phdr.p_type, Phdr.p_flags, 0, 0, 0,
+                                      0, 0, Phdr.p_align);
+      continue;
+    }
+
+    // For other non-LOAD segments (PT_INTERP, PT_GNU_EH_FRAME, etc.),
+    // find the section(s) and use their new output addresses.
+    for (BinarySection &Section : BC->allocatableSections()) {
+      if (!Phdr.contains(Section))
+        continue;
+      if (!Section.getOutputAddress())
+        continue;
+
+      BC->OutputSegments.emplace_back(
+          Phdr.p_type, Phdr.p_flags, Section.getOutputFileOffset(),
+          Section.getOutputAddress(), Section.getOutputAddress(),
+          Section.getOutputSize(), Section.getOutputSize(), Phdr.p_align);
+      break;
+    }
+  }
+
+  // Set layout start address so passes (e.g. LongJmp) know where new code is.
+  BC->LayoutStartAddress = NextAvailableAddress;
+
+  LLVM_DEBUG({
+    dbgs() << "BOLT-DEBUG: -rewrite layout complete\n";
+    for (const ProgramHeader &Phdr : BC->OutputSegments)
+      dbgs() << "  " << Phdr << '\n';
+  });
+}
+
 void RewriteInstance::mapFileSections(BOLTLinker::SectionMapper MapSection) {
   BC->deregisterUnusedSections();
 
@@ -3497,6 +3681,12 @@ void RewriteInstance::mapFileSections(BOLTLinker::SectionMapper MapSection) {
       MapSection(*RelocatedEHFrameSection, NextAvailableAddress);
       BC->deregisterSection(*RelocatedEHFrameSection);
     }
+  }
+
+  // In -rewrite mode, use segment-based layout that relocates all sections.
+  if (opts::Rewrite) {
+    mapLoadableSegmentsRewrite(MapSection);
+    return;
   }
 
   mapCodeSections(MapSection);
@@ -3852,6 +4042,26 @@ void RewriteInstance::patchELFPHDRTable() {
   raw_fd_ostream &OS = Out->os();
 
   // Write/re-write program headers.
+  // In -rewrite mode, write the complete program header table from
+  // OutputSegments instead of patching input phdrs.
+  if (opts::Rewrite) {
+    Phnum = BC->OutputSegments.size();
+    OS.seek(PHDRTableOffset);
+    for (const ProgramHeader &Phdr : BC->OutputSegments) {
+      ELF64LE::Phdr OutPhdr;
+      OutPhdr.p_type = Phdr.p_type;
+      OutPhdr.p_flags = Phdr.p_flags;
+      OutPhdr.p_offset = Phdr.p_offset;
+      OutPhdr.p_vaddr = Phdr.p_vaddr;
+      OutPhdr.p_paddr = Phdr.p_paddr;
+      OutPhdr.p_filesz = Phdr.p_filesz;
+      OutPhdr.p_memsz = Phdr.p_memsz;
+      OutPhdr.p_align = Phdr.p_align;
+      OS.write(reinterpret_cast<const char *>(&OutPhdr), sizeof(OutPhdr));
+    }
+    return;
+  }
+
   Phnum = Obj.getHeader().e_phnum;
   if (PHDRTableOffset) {
     // Writing new pheader table and adding one new entry for R+X segment.
@@ -5398,22 +5608,44 @@ void RewriteInstance::rewriteFile() {
 
   raw_fd_ostream &OS = Out->os();
 
-  // Copy allocatable part of the input.
-  OS << InputFile->getData().substr(0, FirstNonAllocatableOffset);
+  if (opts::Rewrite) {
+    // In rewrite mode, do not byte-copy the input allocatable region.
+    // Write the ELF header (64 bytes) from the input, then seek past the
+    // PHDR table area. Sections are written individually at their new
+    // OutputFileOffset values below.
+    const uint64_t EhdrSize = 64; // sizeof(ELF64LE ehdr)
+    OS << InputFile->getData().substr(0, EhdrSize);
+    // Reserve space for PHDR table + all section data.
+    uint64_t EndOffset = 0;
+    for (BinarySection &Section : BC->allocatableSections()) {
+      if (Section.isFinalized() && Section.getOutputFileOffset() &&
+          !Section.isLinkOnly())
+        EndOffset = std::max(EndOffset, Section.getOutputFileOffset() +
+                                            Section.getOutputSize());
+    }
+    OS.seek(std::max(EndOffset, PHDRTableOffset + BC->MaxPHDRSize));
+  } else {
+    // Copy allocatable part of the input.
+    OS << InputFile->getData().substr(0, FirstNonAllocatableOffset);
+  }
 
   auto Streamer = BC->createStreamer(OS);
   // Make sure output stream has enough reserved space, otherwise
-  // pwrite() will fail.
-  uint64_t Offset = OS.seek(getFileOffsetForAddress(NextAvailableAddress));
-  (void)Offset;
-  assert(Offset == getFileOffsetForAddress(NextAvailableAddress) &&
-         "error resizing output file");
+  // pwrite() will fail. In -rewrite mode, space was already reserved above.
+  if (!opts::Rewrite) {
+    uint64_t Offset = OS.seek(getFileOffsetForAddress(NextAvailableAddress));
+    (void)Offset;
+    assert(Offset == getFileOffsetForAddress(NextAvailableAddress) &&
+           "error resizing output file");
+  }
 
   // Overwrite functions with fixed output address. This is mostly used by
   // non-relocation mode, with one exception: injected functions are covered
-  // here in both modes.
+  // here in both modes. Skip in -rewrite mode where all sections are written
+  // from scratch at their new offsets.
   uint64_t CountOverwrittenFunctions = 0;
   uint64_t OverwrittenScore = 0;
+  if (!opts::Rewrite) {
   for (BinaryFunction *Function : BC->getAllBinaryFunctions()) {
     if (Function->getImageAddress() == 0 || Function->getImageSize() == 0)
       continue;
@@ -5491,6 +5723,8 @@ void RewriteInstance::rewriteFile() {
     }
   }
 
+  } // end if (!opts::Rewrite)
+
   // Print function statistics for non-relocation mode.
   if (!BC->HasRelocations) {
     outs() << "BOLT: " << CountOverwrittenFunctions << " out of "
@@ -5504,7 +5738,7 @@ void RewriteInstance::rewriteFile() {
     }
   }
 
-  if (BC->HasRelocations && opts::TrapOldCode) {
+  if (BC->HasRelocations && opts::TrapOldCode && !opts::Rewrite) {
     uint64_t SavedPos = OS.tell();
     // Overwrite function body to make sure we never execute these instructions.
     for (auto &BFI : BC->getBinaryFunctions()) {
@@ -5683,6 +5917,14 @@ uint64_t RewriteInstance::getNewValueForSymbol(const StringRef Name) {
 }
 
 uint64_t RewriteInstance::getFileOffsetForAddress(uint64_t Address) const {
+  // In -rewrite mode, use the output address-to-offset map.
+  if (opts::Rewrite) {
+    const auto It = BC->OutputAddressToOffsetMap.find(Address);
+    if (It != BC->OutputAddressToOffsetMap.end())
+      return It->second;
+    return 0;
+  }
+
   // Check if it's possibly part of the new segment.
   if (Address >= NewTextSegmentAddress)
     return Address - NewTextSegmentAddress + NewTextSegmentOffset;
