@@ -4217,8 +4217,26 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
     // Map file-backed sections.
     for (BinarySection *Section : Sections) {
       const uint64_t Alignment = Section->getAlignment();
-      NextAvailableAddress = alignTo(NextAvailableAddress, Alignment);
-      NextAvailableOffset = alignTo(NextAvailableOffset, Alignment);
+      // Preserve the page phase of the input .got so that all GOT slots
+      // which shared an input page still share an output page. A single
+      // ADRP (retargeted by FixRelaxations to one GOTENT page) can then
+      // serve loads of multiple slots via base-register reuse. ADRP
+      // resolves at a fixed 4KB granularity (imm21 << 12), so the regular
+      // page size - not the huge-page alignment - is the right quantum
+      // here; this costs at most one 4KB page of padding. Both address
+      // and file offset get the same phase to keep p_offset congruent to
+      // p_vaddr modulo the page size within the LOAD segment.
+      if (opts::Rewrite && Section->getName() == ".got") {
+        const uint64_t Phase =
+            Section->getAddress() & (BC->RegularPageSize - 1);
+        NextAvailableAddress =
+            alignTo(NextAvailableAddress, BC->RegularPageSize) + Phase;
+        NextAvailableOffset =
+            alignTo(NextAvailableOffset, BC->RegularPageSize) + Phase;
+      } else {
+        NextAvailableAddress = alignTo(NextAvailableAddress, Alignment);
+        NextAvailableOffset = alignTo(NextAvailableOffset, Alignment);
+      }
 
       uint64_t Size = Section->getOutputSize();
       // In -rewrite mode, reserve extra space for .eh_frame_hdr in case the
