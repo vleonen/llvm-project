@@ -294,6 +294,7 @@ public:
   void setRelro() { IsRelro = true; }
   unsigned getELFType() const { return ELFType; }
   unsigned getELFFlags() const { return ELFFlags; }
+  void setELFType(unsigned Type) { ELFType = Type; }
 
   uint8_t *getData() {
     return reinterpret_cast<uint8_t *>(
@@ -493,6 +494,14 @@ public:
     OutputContents = StringRef(reinterpret_cast<const char *>(Data), NewSize);
     OutputSize = NewSize;
     IsFinalized = true;
+  }
+
+  /// Grow the output size without changing the contents: the extra tail is
+  /// zero-filled in the output file. Unlike updateContents(), this never
+  /// extends OutputContents past its underlying buffer.
+  void setOutputSize(size_t NewSize) {
+    assert(NewSize >= OutputSize && "shrinking output size not supported");
+    OutputSize = NewSize;
   }
 
   /// Reorder the contents of this section according to /p Order.  If

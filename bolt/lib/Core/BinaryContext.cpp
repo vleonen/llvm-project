@@ -973,7 +973,7 @@ void BinaryContext::adjustCodePadding() {
       continue;
 
     if (!hasValidCodePadding(BF)) {
-      if (HasRelocations) {
+      if (HasRelocations && !opts::Rewrite) {
         if (opts::Verbosity >= 1) {
           outs() << "BOLT-INFO: function " << BF
                  << " has invalid padding. Ignoring the function.\n";

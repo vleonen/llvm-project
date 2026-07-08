@@ -206,8 +206,9 @@ void BinarySection::flushPendingRelocations(raw_pwrite_stream &OS,
   // this means using their input file offsets, since the output file offset
   // could change (e.g. for new instance of .text). For non-allocatable
   // sections, the output offset should always be a valid one.
-  const uint64_t SectionFileOffset =
-      isAllocatable() ? getInputFileOffset() : getOutputFileOffset();
+  const uint64_t SectionFileOffset = (isAllocatable() && !opts::Rewrite)
+                                         ? getInputFileOffset()
+                                         : getOutputFileOffset();
   LLVM_DEBUG(
       dbgs() << "BOLT-DEBUG: flushing pending relocations for section "
              << getName() << '\n'
