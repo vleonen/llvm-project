@@ -6312,11 +6312,13 @@ void RewriteInstance::rewriteFile() {
     if (opts::Rewrite && Section.getOutputFileOffset() == 0)
       continue;
     if (opts::Rewrite && !Section.isText() && !Section.isVirtual() &&
-        Section.hasSectionRef()) {
+        Section.hasSectionRef() && !BC->IsStaticExecutable) {
       // In rewrite mode, write original input content for data sections.
       // The MCStreamer/JITLink pipeline may corrupt non-relocated entries.
       // The dynamic linker applies RELATIVE relocations from .rela.dyn at
       // load time, so the file content only matters for non-relocated fields.
+      // Skip this for static executables — they have no dynamic linker,
+      // so JITLink-resolved relocation values must be preserved.
       OS.seek(Section.getOutputFileOffset());
       StringRef Contents = Section.getContents();
       uint64_t WriteSize =
@@ -6513,8 +6515,10 @@ void RewriteInstance::rewriteFile() {
   // non-relocated entries in data sections. The dynamic linker applies
   // RELATIVE relocations from .rela.dyn at load time, so the file content
   // only matters for non-relocated fields.
+  // Skip this for static executables — they have no dynamic linker to
+  // re-apply relocations, so JITLink-resolved values must be preserved.
   // Exclude sections that are intentionally patched by BOLT post-emit code.
-  if (opts::Rewrite) {
+  if (opts::Rewrite && !BC->IsStaticExecutable) {
     auto IsPatchedSection = [&](StringRef Name) {
       static const char *const PatchedSections[] = {
           ".dynamic",       ".got",          ".got.plt",
