@@ -63,9 +63,13 @@ Error FixRelaxations::runOnFunctions(BinaryContext &BC) {
     runOnFunction(BF);
   };
 
+  ParallelUtilities::PredicateTy SkipFunc = [&](const BinaryFunction &BF) {
+    return BF.isPLTFunction();
+  };
+
   ParallelUtilities::runOnEachFunction(
-      BC, ParallelUtilities::SchedulingPolicy::SP_INST_LINEAR, WorkFun, nullptr,
-      "FixRelaxations");
+      BC, ParallelUtilities::SchedulingPolicy::SP_INST_LINEAR, WorkFun,
+      SkipFunc, "FixRelaxations");
   return Error::success();
 }
 
