@@ -615,6 +615,10 @@ Error RewriteInstance::discoverStorage(ELFObjectFile<ELFT> *ELFObjFile) {
 
   auto PHs = PHsOrErr.get();
   for (const typename ELFT::Phdr &Phdr : PHs) {
+    // Snapshot all input program headers for -rewrite segment-based layout.
+    BC->InputSegments.emplace_back(Phdr.p_type, Phdr.p_flags, Phdr.p_offset,
+                                   Phdr.p_vaddr, Phdr.p_paddr, Phdr.p_filesz,
+                                   Phdr.p_memsz, Phdr.p_align);
     switch (Phdr.p_type) {
     case ELF::PT_LOAD:
       BC->FirstAllocAddress = std::min(BC->FirstAllocAddress,
@@ -637,6 +641,8 @@ Error RewriteInstance::discoverStorage(ELFObjectFile<ELFT> *ELFObjFile) {
       if (BC->TheTriple->getArch() == llvm::Triple::x86_64 &&
           Phdr.p_vaddr >= BinaryContext::KernelStartX86_64)
         BC->IsLinuxKernel = true;
+      if (!(Phdr.p_flags & ELF::PF_X) && !(Phdr.p_flags & ELF::PF_W))
+        BC->HasReadOnlySegment = true;
       break;
     case ELF::PT_INTERP:
       BC->HasInterpHeader = true;
@@ -2441,6 +2447,29 @@ void RewriteInstance::adjustCommandLineOptions() {
     opts::UseOldText = false;
   }
 
+  if (opts::Rewrite) {
+    if (!BC->HasRelocations) {
+      errs() << "BOLT-ERROR: -rewrite requires relocation mode\n";
+      exit(1);
+    }
+    if (opts::UseOldText) {
+      errs() << "BOLT-ERROR: -rewrite is incompatible with -use-old-text\n";
+      exit(1);
+    }
+    if (opts::UseGnuStack) {
+      errs() << "BOLT-ERROR: -rewrite is incompatible with -use-gnu-stack\n";
+      exit(1);
+    }
+    if (opts::Instrument) {
+      errs() << "BOLT-ERROR: -rewrite is incompatible with -instrument\n";
+      exit(1);
+    }
+    if (!BC->isAArch64() && !BC->isX86()) {
+      errs() << "BOLT-ERROR: -rewrite is only supported on AArch64 and X86\n";
+      exit(1);
+    }
+  }
+
   if (!opts::AlignText.getNumOccurrences())
     opts::AlignText = BC->PageAlign;
 
@@ -2460,8 +2489,14 @@ void RewriteInstance::adjustCommandLineOptions() {
   BC->UseCompactAligner = opts::UseCompactAligner;
   BC->X86AlignBranchBoundaryHotOnly = opts::X86AlignBranchBoundaryHotOnly;
 
+  if (opts::Rewrite && opts::Lite) {
+    BC->errs() << "BOLT-WARNING: -rewrite overrides -lite "
+                  "(all functions must be emitted in -rewrite mode)\n";
+    opts::Lite = false;
+  }
+
   if (BC->isX86() && opts::Lite.getNumOccurrences() == 0 && !opts::StrictMode &&
-      !opts::UseOldText)
+      !opts::UseOldText && !opts::Rewrite)
     opts::Lite = true;
 
   if (opts::Lite && opts::UseOldText) {
@@ -4006,6 +4041,11 @@ void RewriteInstance::preregisterSections() {
 void RewriteInstance::emitAndLink() {
   NamedRegionTimer T("emitAndLink", "emit and link", TimerGroupName,
                      TimerGroupDesc, opts::TimeRewrite);
+
+  if (opts::Rewrite) {
+    errs() << "BOLT-ERROR: -rewrite mode is not yet implemented\n";
+    exit(1);
+  }
 
   SmallString<0> ObjectBuffer;
   raw_svector_ostream OS(ObjectBuffer);
@@ -6152,6 +6192,8 @@ Error RewriteInstance::readELFDynamic(ELFObjectFile<ELFT> *File) {
         BC->outs() << "BOLT-INFO: static pie executable detected\n";
         BC->IsStaticExecutable = true;
       }
+      if (Flags & ELF::DF_1_NOW)
+        BC->RequiresZNow = true;
       break;
     }
     case ELF::DT_INIT:

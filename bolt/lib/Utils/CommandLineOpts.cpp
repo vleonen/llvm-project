@@ -355,6 +355,11 @@ cl::opt<bool> UseOldText(
     cl::desc("reuse space in old .text if possible (relocation mode)"),
     cl::cat(BoltCategory));
 
+cl::opt<bool> Rewrite(
+    "rewrite",
+    cl::desc("relocate all sections in the binary in-place (experimental)"),
+    cl::Hidden, cl::cat(BoltCategory));
+
 cl::opt<bool> UpdateDebugSections(
     "update-debug-sections",
     cl::desc("update DWARF debug sections of the executable"),
