@@ -6356,46 +6356,44 @@ template <typename ELFT>
 void RewriteInstance::patchELFGOT(ELFObjectFile<ELFT> *File) {
   raw_fd_ostream &OS = Out->os();
 
-  SectionRef GOTSection;
-  for (const SectionRef &Section : File->sections()) {
-    StringRef SectionName = cantFail(Section.getName());
-    if (SectionName == ".got") {
-      GOTSection = Section;
-      break;
+  auto patchSection = [&](StringRef SectionName, bool UseDataAddr) {
+    SectionRef TargetSection;
+    for (const SectionRef &Section : File->sections()) {
+      if (cantFail(Section.getName()) == SectionName) {
+        TargetSection = Section;
+        break;
+      }
     }
-  }
-  if (!GOTSection.getObject()) {
-    if (!BC->IsStaticExecutable)
-      BC->errs() << "BOLT-INFO: no .got section found\n";
-    return;
-  }
+    if (!TargetSection.getObject())
+      return;
 
-  // In -rewrite mode, the .got section is at a new output offset.
-  uint64_t GOTFileOffset = 0;
-  if (opts::Rewrite) {
-    BinarySection *GOTSec = BC->getSectionForSectionRef(GOTSection);
-    if (GOTSec && GOTSec->getOutputFileOffset())
-      GOTFileOffset = GOTSec->getOutputFileOffset();
-  }
+    uint64_t SecFileOffset = 0;
+    if (opts::Rewrite) {
+      BinarySection *BoltSec = BC->getSectionForSectionRef(TargetSection);
+      if (BoltSec && BoltSec->getOutputFileOffset())
+        SecFileOffset = BoltSec->getOutputFileOffset();
+    }
 
-  StringRef GOTContents = cantFail(GOTSection.getContents());
-  for (const uint64_t *GOTEntry =
-           reinterpret_cast<const uint64_t *>(GOTContents.data());
-       GOTEntry < reinterpret_cast<const uint64_t *>(GOTContents.data() +
-                                                     GOTContents.size());
-       ++GOTEntry) {
-    if (uint64_t NewAddress = getNewFunctionAddress(*GOTEntry)) {
-      LLVM_DEBUG(dbgs() << "BOLT-DEBUG: patching GOT entry 0x"
-                        << Twine::utohexstr(*GOTEntry) << " with 0x"
+    StringRef Contents = cantFail(TargetSection.getContents());
+    for (const uint64_t *Entry =
+             reinterpret_cast<const uint64_t *>(Contents.data());
+         Entry <
+         reinterpret_cast<const uint64_t *>(Contents.data() + Contents.size());
+         ++Entry) {
+      uint64_t NewAddress = UseDataAddr ? getNewFunctionOrDataAddress(*Entry)
+                                        : getNewFunctionAddress(*Entry);
+      if (!NewAddress || NewAddress == *Entry)
+        continue;
+      LLVM_DEBUG(dbgs() << "BOLT-DEBUG: patching " << SectionName << " entry 0x"
+                        << Twine::utohexstr(*Entry) << " with 0x"
                         << Twine::utohexstr(NewAddress) << '\n');
       uint64_t EntryOffset;
-      if (opts::Rewrite && GOTFileOffset)
-        EntryOffset =
-            GOTFileOffset +
-            (reinterpret_cast<const char *>(GOTEntry) - GOTContents.data());
+      if (opts::Rewrite && SecFileOffset)
+        EntryOffset = SecFileOffset +
+                      (reinterpret_cast<const char *>(Entry) - Contents.data());
       else
         EntryOffset =
-            reinterpret_cast<const char *>(GOTEntry) - File->getData().data();
+            reinterpret_cast<const char *>(Entry) - File->getData().data();
       if (opts::Rewrite) {
         OS.seek(EntryOffset);
         OS.write(reinterpret_cast<const char *>(&NewAddress),
@@ -6405,7 +6403,21 @@ void RewriteInstance::patchELFGOT(ELFObjectFile<ELFT> *File) {
                   sizeof(NewAddress), EntryOffset);
       }
     }
-  }
+  };
+
+  // Preserve the upstream diagnostic for a missing .got section.
+  auto hasSection = [&](StringRef SectionName) {
+    for (const SectionRef &Section : File->sections())
+      if (cantFail(Section.getName()) == SectionName)
+        return true;
+    return false;
+  };
+  if (!hasSection(".got") && !BC->IsStaticExecutable)
+    BC->outs() << "BOLT-INFO: no .got section found\n";
+
+  patchSection(".got", /*UseDataAddr=*/false);
+  if (!BC->IsStaticExecutable)
+    patchSection(".got.plt", /*UseDataAddr=*/true);
 }
 
 template <typename ELFT>
