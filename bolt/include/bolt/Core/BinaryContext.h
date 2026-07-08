@@ -90,6 +90,65 @@ inline raw_ostream &operator<<(raw_ostream &OS, const SegmentInfo &SegInfo) {
   return OS;
 }
 
+/// Endian-independent representation of an ELF program header.
+///
+/// Used by the -rewrite mode to model input and output segments. Unlike
+/// SegmentInfo (which describes a single contiguous file range), ProgramHeader
+/// preserves all ELF Phdr fields so that we can faithfully reconstruct the
+/// program header table when rewriting the entire binary in-place.
+struct ProgramHeader {
+  uint32_t p_type{0};
+  uint32_t p_flags{0};
+  uint64_t p_offset{0};
+  uint64_t p_vaddr{0};
+  uint64_t p_paddr{0};
+  uint64_t p_filesz{0};
+  uint64_t p_memsz{0};
+  uint64_t p_align{0};
+
+  ProgramHeader() = default;
+
+  ProgramHeader(uint32_t Type, uint32_t Flags, uint64_t Offset, uint64_t Vaddr,
+                uint64_t Paddr, uint64_t Filesz, uint64_t Memsz, uint64_t Align)
+      : p_type(Type), p_flags(Flags), p_offset(Offset), p_vaddr(Vaddr),
+        p_paddr(Paddr), p_filesz(Filesz), p_memsz(Memsz), p_align(Align) {}
+
+  /// Return true if \p Section falls inside this segment's virtual address
+  /// range and has a non-zero file offset.
+  bool contains(const BinarySection &Section) const {
+    return Section.getAddress() && Section.getInputFileOffset() &&
+           Section.getAddress() >= p_vaddr &&
+           (Section.getAddress() + !Section.isTBSS() * Section.getSize() <=
+            p_vaddr + p_memsz);
+  }
+
+  bool isTLS() const { return p_type == ELF::PT_TLS; }
+  bool isLOAD() const { return p_type == ELF::PT_LOAD; }
+  bool isExec() const { return p_flags & ELF::PF_X; }
+
+  /// Map segment flags to the equivalent ELF section flags (SHF_*).
+  unsigned getSectionFlags() const {
+    return ELF::SHF_ALLOC * (p_type == ELF::PT_LOAD) |
+           ELF::SHF_EXECINSTR * !!(p_flags & ELF::PF_X) |
+           ELF::SHF_WRITE * !!(p_flags & ELF::PF_W);
+  }
+
+  void print(raw_ostream &OS) const {
+    OS << "ProgramHeader { type: 0x" << Twine::utohexstr(p_type)
+       << ", flags: 0x" << Twine::utohexstr(p_flags) << ", offset: 0x"
+       << Twine::utohexstr(p_offset) << ", vaddr: 0x"
+       << Twine::utohexstr(p_vaddr) << ", filesz: 0x"
+       << Twine::utohexstr(p_filesz) << ", memsz: 0x"
+       << Twine::utohexstr(p_memsz) << ", align: 0x"
+       << Twine::utohexstr(p_align) << " }";
+  }
+};
+
+inline raw_ostream &operator<<(raw_ostream &OS, const ProgramHeader &Phdr) {
+  Phdr.print(OS);
+  return OS;
+}
+
 // AArch64-specific symbol markers used to delimit code/data in .text.
 enum class MarkerSymType : char {
   NONE = 0,
@@ -344,6 +403,30 @@ public:
 
   /// Symbols that are expected to be undefined in MCContext during emission.
   std::unordered_set<MCSymbol *> UndefinedSymbols;
+
+  /// Input program headers copied from the ELF file, used by -rewrite mode
+  /// to drive segment-based layout.
+  std::vector<ProgramHeader> InputSegments;
+
+  /// Output program headers produced by -rewrite mode layout, written to the
+  /// program header table in the rewritten binary.
+  std::vector<ProgramHeader> OutputSegments;
+
+  /// [virtual address] -> [file offset] mapping for output loadable segments,
+  /// used by -rewrite mode to resolve addresses to file offsets.
+  std::map<uint64_t, uint64_t> OutputAddressToOffsetMap;
+
+  /// Maximum size reserved for the program header table in -rewrite mode.
+  uint64_t MaxPHDRSize{0};
+
+  /// [symbol name] -> [GOT entry address] mapping populated during GOT/PLT
+  /// analysis in -rewrite mode, used to resolve non-relaxed GOT accesses.
+  StringMap<uint64_t> GOTSymbolsByName;
+
+  /// True if the input binary has a read-only (non-executable, non-writable)
+  /// PT_LOAD segment. Used by -rewrite layout to decide whether read-only
+  /// sections can be merged into the executable segment.
+  bool HasReadOnlySegment{false};
 
   /// [name] -> [BinaryData*] map used for global symbol resolution.
   using SymbolMapType = StringMap<BinaryData *>;
