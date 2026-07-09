@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bolt/Passes/FixRelaxationPass.h"
+#include "bolt/Core/FunctionLayout.h"
 #include "bolt/Core/ParallelUtilities.h"
 #include "bolt/Utils/CommandLineOpts.h"
 
@@ -24,7 +25,7 @@ namespace bolt {
 //
 // Two instruction patterns are handled:
 //
-// 1. ADRP+ADD (linker-relaxed GOT reference → direct address):
+// 1. ADRP+ADD (linker-relaxed GOT reference -> direct address):
 //
 //    The linker may relax an ADRP+LDR(GOT) pair into ADRP+ADD(direct address).
 //    In this case, the ADD's relocation was updated during relocation reading
@@ -37,7 +38,7 @@ namespace bolt {
 //    Both ADRP and LDR reference __BOLT_got_zero with addend = old GOT entry
 //    address. In -rewrite mode, the GOT section is relocated to a new address.
 //    Since __BOLT_got_zero is at address 0, JITLink would compute the OLD GOT
-//    address — which is now wrong. We create a GOTENT symbol at the old GOT
+//    address -- which is now wrong. We create a GOTENT symbol at the old GOT
 //    entry address and retarget both ADRP and LDR to reference it.
 //
 //    The GOTENT symbol is emitted as a label in the .got section by
@@ -51,6 +52,12 @@ namespace bolt {
 // Note: Case 2 is gated on -rewrite mode because in regular BOLT mode the GOT
 // stays at its original address and __BOLT_got_zero references are already
 // correct.
+//
+// Instruction search: the ADRP and its paired ADD/LDR may not be adjacent.
+// The compiler may interleave independent instructions between them for
+// scheduling. We search forward from the ADRP, looking for an ADD or LDR
+// that uses the ADRP's destination register as an input. We stop if the
+// register is clobbered (overwritten) before finding the paired instruction.
 void FixRelaxations::runOnFunction(BinaryFunction &BF) {
   BinaryContext &BC = BF.getBinaryContext();
   for (BinaryBasicBlock &BB : BF) {
@@ -63,18 +70,104 @@ void FixRelaxations::runOnFunction(BinaryFunction &BF) {
       if (!AdrpSymbol || AdrpSymbol->getName() != "__BOLT_got_zero")
         continue;
 
-      // Find the next meaningful instruction, skipping NOPs that may have
-      // been inserted between ADRP and ADD/LDR (e.g., to prevent linker
-      // relaxation of GOT loads). In compiler-generated code, ADRP and its
-      // paired ADD/LDR are always adjacent, but hand-written assembly or
-      // compiler alignment directives may insert NOPs between them.
-      auto NextII = std::next(II);
-      while (NextII != BB.end() && BC.MIB->isNoop(*NextII))
-        ++NextII;
-      if (NextII == BB.end())
+      // Search forward for the instruction paired with this ADRP.
+      // The ADRP writes to operand 0 (Xd). The paired instruction (ADD or
+      // LDR) uses Xd as an input. We scan forward, skipping NOPs and
+      // unrelated instructions, until we find an ADD or LDR that references
+      // Xd. We stop if Xd is overwritten by another instruction.
+      //
+      // The search continues past the end of the basic block: BOLT may split
+      // the original block between the ADRP and its paired LDR (e.g. when a
+      // branch targets the instruction right after the ADRP), which is
+      // common in compiler-emitted code with converging address-computation
+      // paths. The register-clobber stop below terminates the search at the
+      // first redefinition of Xd, so ADRPs overwritten by a later ADRP
+      // (redundant dead computations) are correctly left unpaired.
+      const unsigned AdrpDestReg = Adrp.getOperand(0).getReg();
+      MCInst *Paired = nullptr;
+
+      auto scanForPair = [&](MCInst &Candidate) -> bool {
+        // Return true when the search must stop (pair found or clobber).
+        if (BC.MIB->isNoop(Candidate))
+          return false;
+        if (BC.MIB->matchAdrpAddPair(Adrp, Candidate) ||
+            (BC.MIB->mayLoad(Candidate) && Candidate.getOperand(1).isReg() &&
+             Candidate.getOperand(1).getReg() == AdrpDestReg)) {
+          Paired = &Candidate;
+          return true;
+        }
+        if (Candidate.getNumOperands() > 0 && Candidate.getOperand(0).isReg() &&
+            Candidate.getOperand(0).getReg() == AdrpDestReg &&
+            !BC.MIB->isNoop(Candidate))
+          return true;
+        return false;
+      };
+
+      auto scanRange = [&](auto Begin, auto End) -> bool {
+        for (auto PairII = Begin; PairII != End; ++PairII)
+          if (scanForPair(*PairII))
+            return true;
+        return false;
+      };
+
+      // Scan the rest of the current block, then continue into blocks that
+      // control flow reaches: the layout-next block (fall-through path of a
+      // conditional branch or an unconditional branch to it), or the target
+      // of a trailing unconditional branch. This is required because BOLT
+      // may split the original block between the ADRP and its paired LDR
+      // (e.g. when a branch targets the instruction right after the ADRP),
+      // which is common in compiler-emitted code with converging
+      // address-computation paths. The register-clobber stop terminates the
+      // scan at the first redefinition of Xd, so ADRPs overwritten by a
+      // later ADRP (redundant dead computations) are left unpaired.
+      if (scanRange(std::next(II), BB.end()))
+        goto PairSearchDone;
+      {
+        const FunctionLayout &Layout = BF.getLayout();
+        SmallPtrSet<BinaryBasicBlock *, 8> Visited;
+        SmallVector<BinaryBasicBlock *, 4> WorkList;
+        const auto enqueue = [&](BinaryBasicBlock *Dest) {
+          if (Dest && !Dest->empty() && Visited.insert(Dest).second)
+            WorkList.push_back(Dest);
+        };
+        // Seed with the layout-next block and the unconditional branch
+        // target of the ADRP block.
+        {
+          const unsigned NextIdx = BB.getLayoutIndex() + 1;
+          if (NextIdx < Layout.block_size()) {
+            auto It = Layout.blocks().begin();
+            std::advance(It, NextIdx);
+            enqueue(*It);
+          }
+          if (!BB.empty() && BC.MIB->isUnconditionalBranch(BB.back())) {
+            if (BinaryBasicBlock *Taken = BB.getSuccessor(0))
+              enqueue(Taken);
+          }
+        }
+        unsigned Depth = 0;
+        while (!WorkList.empty() && ++Depth < 8) {
+          BinaryBasicBlock *ScanBB = WorkList.pop_back_val();
+          // Skip blocks that cannot be reached from the previously scanned
+          // ones: keep scanning layout-next and unconditional targets only.
+          if (!BC.MIB->isUnconditionalBranch(ScanBB->back())) {
+            const unsigned NextIdx = ScanBB->getLayoutIndex() + 1;
+            if (NextIdx < Layout.block_size()) {
+              auto It = Layout.blocks().begin();
+              std::advance(It, NextIdx);
+              enqueue(*It);
+            }
+          } else if (BinaryBasicBlock *Taken = ScanBB->getSuccessor(0)) {
+            enqueue(Taken);
+          }
+          if (scanRange(ScanBB->begin(), ScanBB->end()))
+            goto PairSearchDone;
+        }
+      }
+    PairSearchDone:
+      if (!Paired)
         continue;
 
-      MCInst &Next = *NextII;
+      MCInst &Next = *Paired;
 
       // ----------------------------------------------------------------
       // Case 1: ADRP+ADD (linker-relaxed sequence)
@@ -114,48 +207,29 @@ void FixRelaxations::runOnFunction(BinaryFunction &BF) {
       if (!opts::Rewrite || !BC.MIB->mayLoad(Next))
         continue;
 
-      // Verify ADRP destination register matches LDR base register.
-      if (Next.getOperand(1).isReg() &&
-          Adrp.getOperand(0).getReg() == Next.getOperand(1).getReg()) {
-        // Verify the LDR also references __BOLT_got_zero (operand 2).
-        const MCSymbol *LdrSymbol = BC.MIB->getTargetSymbol(Next, 2);
-        if (!LdrSymbol || LdrSymbol->getName() != "__BOLT_got_zero")
-          continue;
+      if (!Next.getOperand(1).isReg() ||
+          Adrp.getOperand(0).getReg() != Next.getOperand(1).getReg())
+        continue;
 
-        // The ADRP addend is the old GOT page address (4KB-aligned).
-        // The LDR addend is the offset within that page (bits 0-11).
-        // The full old GOT entry address is their sum.
-        const int64_t AdrpAddend = BC.MIB->getTargetAddend(Adrp);
-        const int64_t GOTEntryAddr =
-            AdrpAddend + BC.MIB->getTargetAddend(Next, 2);
-        if (!GOTEntryAddr)
-          continue;
+      const MCSymbol *LdrSymbol = BC.MIB->getTargetSymbol(Next, 2);
+      if (!LdrSymbol || LdrSymbol->getName() != "__BOLT_got_zero")
+        continue;
 
-        auto L = BC.scopeLock();
+      const int64_t AdrpAddend = BC.MIB->getTargetAddend(Adrp);
+      const int64_t GOTEntryAddr =
+          AdrpAddend + BC.MIB->getTargetAddend(Next, 2);
+      if (!GOTEntryAddr)
+        continue;
 
-        // Create or reuse a symbol at the old GOT entry address.
-        // This symbol will be emitted as a label in the .got section by
-        // emitDataSections(), enabling JITLink to resolve it to the new
-        // GOT entry address.
-        MCSymbol *GOTENT = BC.getOrCreateGlobalSymbol(GOTEntryAddr, "GOTENT");
+      auto L = BC.scopeLock();
+      MCSymbol *GOTENT = BC.getOrCreateGlobalSymbol(GOTEntryAddr, "GOTENT");
 
-        // Retarget ADRP to GOTENT (page-relative: computes the 4KB page
-        // containing the GOT entry). The relocation type
-        // R_AARCH64_ADR_PREL_PG_HI21 causes getTargetExprFor to produce
-        // an S_ABS_PAGE expression, which MCStreamer encodes as a
-        // page-relative fixup that JITLink resolves correctly.
-        BC.MIB->setOperandToSymbolRef(Adrp, /*OpNum*/ 1, GOTENT, /*Addend*/ 0,
-                                      BC.Ctx.get(),
-                                      ELF::R_AARCH64_ADR_PREL_PG_HI21);
-
-        // Retarget LDR to GOTENT (page offset: extracts bits 12-15 of the
-        // GOT entry address, scaled by 8 for 64-bit loads). The relocation
-        // type R_AARCH64_LDST64_ABS_LO12_NC causes getTargetExprFor to
-        // produce an S_LO12 expression.
-        BC.MIB->setOperandToSymbolRef(Next, /*OpNum*/ 2, GOTENT, /*Addend*/ 0,
-                                      BC.Ctx.get(),
-                                      ELF::R_AARCH64_LDST64_ABS_LO12_NC);
-      }
+      BC.MIB->setOperandToSymbolRef(Adrp, /*OpNum*/ 1, GOTENT, /*Addend*/ 0,
+                                    BC.Ctx.get(),
+                                    ELF::R_AARCH64_ADR_PREL_PG_HI21);
+      BC.MIB->setOperandToSymbolRef(Next, /*OpNum*/ 2, GOTENT, /*Addend*/ 0,
+                                    BC.Ctx.get(),
+                                    ELF::R_AARCH64_LDST64_ABS_LO12_NC);
     }
   }
 }
