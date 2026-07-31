@@ -638,6 +638,23 @@ Error LowerAnnotations::runOnFunctions(BinaryContext &BC) {
           if (NewGnuArgsSize == CurrentGnuArgsSize)
             continue;
 
+          // Preserve selected annotations and strip the rest.
+          std::optional<uint32_t> Offset = BF->requiresAddressTranslation()
+                                               ? BC.MIB->getOffset(*II)
+                                               : std::nullopt;
+          std::optional<uint32_t> Size = BC.MIB->getSize(*II);
+          MCSymbol *Label = BC.MIB->getInstLabel(*II);
+
+          if (!BF->isGolang())
+            BC.MIB->stripAnnotations(*II);
+
+          if (Offset)
+            BC.MIB->setOffset(*II, *Offset);
+          if (Size)
+            BC.MIB->setSize(*II, *Size);
+          if (Label)
+            BC.MIB->setInstLabel(*II, Label);
+
           auto InsertII = BF->addCFIInstruction(
               BB, II,
               MCCFIInstruction::createGnuArgsSize(nullptr, NewGnuArgsSize));
@@ -647,6 +664,10 @@ Error LowerAnnotations::runOnFunctions(BinaryContext &BC) {
       }
     }
   }
+  // Release all memory taken by annotations
+  if (opts::GolangPass == opts::GV_NONE)
+    BC.MIB->freeAnnotations();
+
   return Error::success();
 }
 
@@ -728,7 +749,21 @@ static uint64_t fixDoubleJumps(BinaryFunction &Function, bool MarkInvalid) {
         } else if (!UncondBranch) {
           assert(Function.getLayout().getBasicBlockAfter(Pred, false) != Succ &&
                  "Don't add an explicit jump to a fallthrough block.");
-          Pred->addBranchInstruction(Succ);
+          if (opts::GolangPass == opts::GV_NONE) {
+            Pred->addBranchInstruction(Succ);
+          } else {
+            // Preserve Go metadata annotations from the replaced jump on the
+            // newly created branch instruction.
+            MCInst *II = BB.getFirstNonPseudoInstr();
+            const BinaryContext &BC = Function.getBinaryContext();
+            MCInst NewInst;
+            NewInst.clear();
+            auto L = BC.scopeLock();
+            BC.MIB->createUncondBranch(NewInst, Succ->getLabel(), BC.Ctx.get());
+            if (II)
+              BC.MIB->copyAnnotationInst(*II, NewInst);
+            Pred->addInstruction(std::move(NewInst));
+          }
         }
       } else {
         // Succ will be null in the tail call case.  In this case we
@@ -997,6 +1032,9 @@ uint64_t SimplifyConditionalTailCalls::fixTailCalls(BinaryFunction &BF) {
     } else if (!HasFallthrough) {
       MCInst Branch;
       MIB->createUncondBranch(Branch, CondSucc->getLabel(), Ctx);
+      if (MCInst *II = PredBB->getFirstNonPseudoInstr();
+          II && opts::GolangPass != opts::GV_NONE)
+        MIB->copyAnnotationInst(*II, Branch);
       PredBB->addInstruction(Branch);
     }
   }

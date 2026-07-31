@@ -3792,9 +3792,20 @@ void BinaryFunction::fixBranches() {
     if (!BB->analyzeBranch(TBB, FBB, CondBranch, UncondBranch))
       continue;
 
+    MCInst TempInstr;
+    TempInstr.clear();
+
+    BinaryBasicBlock::iterator erasedInstrIter = BB->end();
     // We will create unconditional branch with correct destination if needed.
-    if (UncondBranch)
-      BB->eraseInstruction(BB->findInstruction(UncondBranch));
+    if (UncondBranch) {
+      std::vector<MCInst>::iterator II = BB->findInstruction(UncondBranch);
+      {
+        auto L = BC.scopeLock();
+        if (opts::GolangPass != opts::GV_NONE)
+          BC.MIB->copyAnnotationInst(*II, TempInstr);
+      }
+      erasedInstrIter = BB->eraseInstruction(II);
+    }
 
     // Basic block that follows the current one in the final layout.
     const BinaryBasicBlock *const NextBB =
@@ -3805,11 +3816,49 @@ void BinaryFunction::fixBranches() {
       // falls-through into the next function - hence the block will have only
       // one valid successor. Since behaviour is undefined - we replace
       // the conditional branch with an unconditional if required.
-      if (CondBranch)
-        BB->eraseInstruction(BB->findInstruction(CondBranch));
-      if (BB->getSuccessor() == NextBB)
+      if (CondBranch) {
+        std::vector<MCInst>::iterator II = BB->findInstruction(CondBranch);
+        {
+          auto L = BC.scopeLock();
+          if (opts::GolangPass != opts::GV_NONE)
+            BC.MIB->copyAnnotationInst(*II, TempInstr);
+        }
+        erasedInstrIter = BB->eraseInstruction(II);
+      }
+      if (BB->getSuccessor() == NextBB) {
+        if (isGolang()) {
+          MCInst NoopInst;
+          NoopInst.clear();
+          {
+            auto L = BC.scopeLock();
+            BC.MIB->createNoop(NoopInst);
+            BC.MIB->copyAnnotationInst(TempInstr, NoopInst);
+          }
+          if (erasedInstrIter == BB->end())
+            BB->addInstruction(std::move(NoopInst));
+          else
+            BB->insertInstruction(erasedInstrIter, NoopInst);
+        }
         continue;
-      BB->addBranchInstruction(BB->getSuccessor());
+      }
+      {
+        MCInst NewInst;
+        NewInst.clear();
+
+        const MCSymbol *DstLabel = BB->getSuccessor()
+                                       ? BB->getSuccessor()->getLabel()
+                                       : NextBB->getLabel();
+        assert(DstLabel && "missing successor label");
+        auto L = BC.scopeLock();
+        BC.MIB->createUncondBranch(NewInst, DstLabel, BC.Ctx.get());
+        if (opts::GolangPass != opts::GV_NONE)
+          BC.MIB->copyAnnotationInst(TempInstr, NewInst);
+
+        if (erasedInstrIter == BB->end())
+          BB->addInstruction(std::move(NewInst));
+        else
+          BB->insertInstruction(erasedInstrIter, NewInst);
+      }
     } else if (BB->succ_size() == 2) {
       assert(CondBranch && "conditional branch expected");
       const BinaryBasicBlock *TSuccessor = BB->getConditionalSuccessor(true);
@@ -3827,9 +3876,34 @@ void BinaryFunction::fixBranches() {
           continue;
         }
 
+        std::vector<MCInst>::iterator II = BB->findInstruction(CondBranch);
+        {
+          auto L = BC.scopeLock();
+          BC.MIB->copyAnnotationInst(*II, TempInstr);
+        }
         BB->removeDuplicateConditionalSuccessor(CondBranch);
-        if (TSuccessor != NextBB)
-          BB->addBranchInstruction(TSuccessor);
+        if (TSuccessor != NextBB) {
+          if (opts::GolangPass == opts::GV_NONE) {
+            BB->addBranchInstruction(TSuccessor);
+          } else {
+            MCInst NewInst;
+            NewInst.clear();
+            auto L = BC.scopeLock();
+            BC.MIB->createUncondBranch(NewInst, TSuccessor->getLabel(),
+                                       BC.Ctx.get());
+            BC.MIB->copyAnnotationInst(TempInstr, NewInst);
+            BB->addInstruction(std::move(NewInst));
+          }
+        } else if (isGolang()) {
+          MCInst NoopInst;
+          NoopInst.clear();
+          {
+            auto L = BC.scopeLock();
+            BC.MIB->createNoop(NoopInst);
+            BC.MIB->copyAnnotationInst(TempInstr, NoopInst);
+          }
+          BB->addInstruction(std::move(NoopInst));
+        }
         continue;
       }
 
@@ -3876,7 +3950,18 @@ void BinaryFunction::fixBranches() {
           swapSuccessors();
       }
 
-      BB->addBranchInstruction(FSuccessor);
+      if (opts::GolangPass == opts::GV_NONE) {
+        BB->addBranchInstruction(FSuccessor);
+      } else {
+        // Create new branch with annotations copied from CondBranch
+        MCInst NewBranch;
+        {
+          auto L = BC.scopeLock();
+          MIB->createUncondBranch(NewBranch, FSuccessor->getLabel(), Ctx);
+          MIB->copyAnnotationInst(*CondBranch, NewBranch);
+        }
+        BB->addInstruction(std::move(NewBranch));
+      }
     }
     // Cases where the number of successors is 0 (block ends with a
     // terminator) or more than 2 (switch table) don't require branch
