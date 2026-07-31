@@ -612,7 +612,8 @@ void LowerAnnotations::runOnFunctions(BinaryContext &BC) {
           std::optional<uint32_t> Size = BC.MIB->getSize(*II);
           MCSymbol *Label = BC.MIB->getLabel(*II);
 
-          BC.MIB->stripAnnotations(*II);
+          if (!BF->isGolang())
+            BC.MIB->stripAnnotations(*II);
 
           if (Offset)
             BC.MIB->setOffset(*II, *Offset);
@@ -626,7 +627,8 @@ void LowerAnnotations::runOnFunctions(BinaryContext &BC) {
   }
 
   // Release all memory taken by annotations
-  BC.MIB->freeAnnotations();
+  if (opts::GolangPass == opts::GV_NONE)
+    BC.MIB->freeAnnotations();
 }
 
 // Check for dirty state in MCSymbol objects that might be a consequence
@@ -703,7 +705,17 @@ static uint64_t fixDoubleJumps(BinaryFunction &Function, bool MarkInvalid) {
         } else if (!UncondBranch) {
           assert(Function.getLayout().getBasicBlockAfter(Pred, false) != Succ &&
                  "Don't add an explicit jump to a fallthrough block.");
-          Pred->addBranchInstruction(Succ);
+          MCInst *II = BB.getFirstNonPseudoInstr();
+          {
+            const BinaryContext &BC = Function.getBinaryContext();
+            MCInst NewInst;
+            NewInst.clear();
+            auto L = BC.scopeLock();
+            BC.MIB->createUncondBranch(NewInst, Succ->getLabel(), BC.Ctx.get());
+            if (opts::GolangPass != opts::GV_NONE && II)
+              BC.MIB->copyAnnotationInst(*II, NewInst);
+            Pred->addInstruction(std::move(NewInst));
+          }
         }
       } else {
         // Succ will be null in the tail call case.  In this case we
@@ -957,6 +969,9 @@ uint64_t SimplifyConditionalTailCalls::fixTailCalls(BinaryFunction &BF) {
     } else if (!HasFallthrough) {
       MCInst Branch;
       MIB->createUncondBranch(Branch, CondSucc->getLabel(), Ctx);
+      if (MCInst *II = PredBB->getFirstNonPseudoInstr();
+          II && opts::GolangPass != opts::GV_NONE)
+        MIB->copyAnnotationInst(*II, Branch);
       PredBB->addInstruction(Branch);
     }
   }

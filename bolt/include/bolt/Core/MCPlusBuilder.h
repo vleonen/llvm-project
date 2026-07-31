@@ -1884,6 +1884,22 @@ public:
     return Index;
   }
 
+  /// Copy annotations from one instruction to other
+  void copyAnnotationInst(const MCInst &From, MCInst &To) {
+    std::optional<unsigned> FirstAnnotationOp = getFirstAnnotationOpIndex(From);
+    if (!FirstAnnotationOp)
+      return;
+
+    for (unsigned I = *FirstAnnotationOp; I < From.getNumOperands(); ++I) {
+      const int64_t Imm = From.getOperand(I).getImm();
+      const unsigned Index = extractAnnotationIndex(Imm);
+      const int64_t Value = extractAnnotationValue(Imm);
+      setAnnotationOpValue(To, Index, Value);
+    }
+  }
+
+  /// Compare annotations stored in instructions and return true if equal.
+  /// If \p GenericOnly is true compare only generic annotations.
   bool areAnnotationsEqual(const MCInst &A, const MCInst &B,
                            bool GenericOnly = true) const {
     // Get annotation iterators for both instructions
