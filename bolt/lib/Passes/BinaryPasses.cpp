@@ -13,6 +13,7 @@
 #include "bolt/Passes/BinaryPasses.h"
 #include "bolt/Core/FunctionLayout.h"
 #include "bolt/Core/ParallelUtilities.h"
+#include "bolt/Passes/Golang.h"
 #include "bolt/Passes/ReorderAlgorithm.h"
 #include "bolt/Passes/ReorderFunctions.h"
 #include "bolt/Utils/CommandLineOpts.h"
@@ -2044,7 +2045,8 @@ Error RemoveNops::runOnFunctions(BinaryContext &BC) {
   };
 
   ParallelUtilities::PredicateTy SkipFunc = [&](const BinaryFunction &BF) {
-    return BF.shouldPreserveNops();
+    return BF.shouldPreserveNops() ||
+           (opts::GolangPass != opts::GV_NONE && !BF.isSimple());
   };
 
   ParallelUtilities::runOnEachFunction(

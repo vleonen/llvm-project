@@ -13,7 +13,10 @@
 #ifndef BOLT_UTILS_COMMAND_LINE_OPTS_H
 #define BOLT_UTILS_COMMAND_LINE_OPTS_H
 
+#include "bolt/Passes/Golang.h"
 #include "llvm/Support/CommandLine.h"
+
+#include <string>
 
 namespace opts {
 

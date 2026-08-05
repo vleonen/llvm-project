@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bolt/Passes/ReorderFunctions.h"
+#include "bolt/Passes/Golang.h"
 #include "bolt/Passes/HFSort.h"
 #include "bolt/Utils/Utils.h"
 #include "llvm/ADT/STLExtras.h"
@@ -21,6 +22,7 @@
 #define DEBUG_TYPE "hfsort"
 
 using namespace llvm;
+using namespace bolt;
 
 namespace opts {
 
@@ -134,7 +136,7 @@ void ReorderFunctions::reorder(BinaryContext &BC,
   // Assign valid index for functions with valid profile.
   for (auto &It : BFs) {
     BinaryFunction &BF = It.second;
-    if (!BF.hasValidIndex() && BF.hasValidProfile())
+    if (!BF.hasValidIndex() && BF.hasValidProfile() && !BF.isPseudo())
       BF.setIndex(Index++);
   }
 
@@ -323,7 +325,7 @@ Error ReorderFunctions::runOnFunctions(BinaryContext &BC) {
                       });
     uint32_t Index = 0;
     for (BinaryFunction *BF : SortedFunctions)
-      if (BF->hasProfile()) {
+      if (BF->hasProfile() && !BF->isPseudo()) {
         BF->setIndex(Index++);
         LLVM_DEBUG(if (opts::Verbosity > 1) {
           dbgs() << "BOLT-INFO: hot func " << BF->getPrintName() << " ("
@@ -447,6 +449,9 @@ Error ReorderFunctions::runOnFunctions(BinaryContext &BC) {
   reorder(BC, std::move(Clusters), BFs);
 
   BC.HasFinalizedFunctionOrder = true;
+
+  if (opts::GolangPass != opts::GV_NONE && opts::ReorderFunctions != RT_USER)
+    GolangPass::assignGoFunctionIndexes(BFs);
 
   std::unique_ptr<std::ofstream> FuncsFile;
   if (!opts::GenerateFunctionOrderFile.empty()) {

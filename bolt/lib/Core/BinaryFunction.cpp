@@ -3696,6 +3696,22 @@ void BinaryFunction::fixBranches() {
   auto &MIB = BC.MIB;
   MCContext *Ctx = BC.Ctx.get();
 
+  if (!isSimple())
+    return;
+
+  if (opts::GolangPass != opts::GV_NONE && BC.isAArch64()) {
+    for (StringRef Name : getNames()) {
+      for (const std::string &SkipName : opts::DefaultSkipGolangFuncs) {
+        if (Name.contains(SkipName))
+          return;
+      }
+      for (const std::string &SkipName : opts::SkipGolangFuncs) {
+        if (Name.contains(SkipName))
+          return;
+      }
+    }
+  }
+
   for (BinaryBasicBlock *BB : BasicBlocks) {
     const MCSymbol *TBB = nullptr;
     const MCSymbol *FBB = nullptr;

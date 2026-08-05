@@ -15,6 +15,7 @@
 #include "bolt/Passes/FixRISCVCallsPass.h"
 #include "bolt/Passes/FixRelaxationPass.h"
 #include "bolt/Passes/FrameOptimizer.h"
+#include "bolt/Passes/Golang.h"
 #include "bolt/Passes/Hugify.h"
 #include "bolt/Passes/IdenticalCodeFolding.h"
 #include "bolt/Passes/IndirectCallPromotion.h"
@@ -385,6 +386,9 @@ Error BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
 
   Manager.registerPass(std::make_unique<PrintProfileQualityStats>(NeverPrint));
 
+  if (opts::GolangPass != opts::GV_NONE)
+    Manager.registerPass(std::make_unique<GolangPrePass>(BC));
+
   Manager.registerPass(std::make_unique<ValidateInternalCalls>(NeverPrint));
 
   Manager.registerPass(std::make_unique<ValidateMemRefs>(NeverPrint));
@@ -394,8 +398,9 @@ Error BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
   else if (opts::Hugify)
     Manager.registerPass(std::make_unique<HugePage>(NeverPrint));
 
-  Manager.registerPass(std::make_unique<ShortenInstructions>(NeverPrint),
-                       opts::ShortenInstructions);
+  if (opts::GolangPass == opts::GV_NONE)
+    Manager.registerPass(std::make_unique<ShortenInstructions>(NeverPrint),
+                         opts::ShortenInstructions);
 
   Manager.registerPass(std::make_unique<StackOpsTestPass>(PrintStackOps),
                        opts::StackOpsTestPass);
@@ -518,6 +523,9 @@ Error BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
     Manager.registerPass(std::make_unique<LongJmpPass>(PrintLongJmp));
   }
 
+  if (opts::GolangPass != opts::GV_NONE)
+    Manager.registerPass(std::make_unique<GolangPostPass>(BC));
+
   // This pass should always run last.*
   Manager.registerPass(std::make_unique<FinalizeFunctions>(PrintFinalized));
 
@@ -546,6 +554,9 @@ Error BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
   // NOTE: this pass depends on finalized code.
   if (!BC.HasRelocations)
     Manager.registerPass(std::make_unique<CheckLargeFunctions>(NeverPrint));
+
+  if (opts::GolangPass != opts::GV_NONE)
+    Manager.registerPass(std::make_unique<GolangPass>(BC));
 
   Manager.registerPass(std::make_unique<LowerAnnotations>(NeverPrint));
 
