@@ -194,6 +194,39 @@ cl::opt<bool> UpdateDebugSections(
     cl::desc("update DWARF debug sections of the executable"),
     cl::cat(BoltCategory));
 
+cl::opt<opts::GolangVersion> GolangPass(
+    "golang",
+    cl::desc("Use for input binary generated with golang gc compiler"),
+    cl::init(opts::GV_NONE),
+    cl::values(
+        clEnumValN(opts::GV_NONE, "0", "do not use golang optimizations"),
+        clEnumValN(opts::GV_AUTO, "1", "auto detect golang version"),
+        clEnumValN(opts::GV_1_20, "1.20", "use golang 1.20.x optimizations"),
+        clEnumValN(opts::GV_1_22, "1.22", "use golang 1.22.x optimizations"),
+        clEnumValN(opts::GV_1_24, "1.24", "use golang 1.24.x optimizations")),
+    cl::Optional, cl::cat(BoltOptCategory));
+
+cl::opt<bool> GolangPreserveFunctions(
+    "golang-preserve-functions",
+    cl::desc("Do not change some special golang functions"), cl::init(true),
+    cl::ZeroOrMore, cl::Hidden, cl::cat(BoltOptCategory));
+
+cl::opt<bool> GolangRemoveOldPclntab("golang-remove-old-pclntab",
+                                     cl::desc("Remove old pclntab"),
+                                     cl::init(true), cl::ZeroOrMore, cl::Hidden,
+                                     cl::cat(BoltOptCategory));
+
+cl::list<std::string>
+    SkipGolangFuncs("skip-golang-funcs", cl::CommaSeparated,
+                    cl::desc("Go functions to skip during processing"),
+                    cl::value_desc("func1,func2,func3,..."), cl::Hidden,
+                    cl::cat(BoltOptCategory));
+
+const std::vector<std::string> DefaultSkipGolangFuncs = {
+    "runtime.duffzero", "runtime.duffcopy",
+    "runtime.memmove",  "runtime.memclrNoHeapPointers",
+    "runtime.memequal", "countbytebody"};
+
 cl::opt<bool>
     KeepNops("keep-nops",
              cl::desc("keep no-op instructions. By default they are removed."),

@@ -377,7 +377,7 @@ public:
 
   /// Add a new relocation at the given /p Offset.
   void addRelocation(uint64_t Offset, MCSymbol *Symbol, uint64_t Type,
-                     uint64_t Addend, uint64_t Value = 0,
+                     uint64_t Addend = 0, uint64_t Value = 0,
                      bool Pending = false) {
     assert(Offset < getSize() && "offset not within section bounds");
     if (!Pending) {

@@ -12,6 +12,7 @@
 
 #include "bolt/Passes/Instrumentation.h"
 #include "bolt/Core/ParallelUtilities.h"
+#include "bolt/Passes/Golang.h"
 #include "bolt/RuntimeLibs/InstrumentationRuntimeLibrary.h"
 #include "bolt/Utils/CommandLineOpts.h"
 #include "bolt/Utils/Utils.h"
@@ -307,6 +308,8 @@ Instrumentation::createInstrumentationSnippet(BinaryContext &BC, bool IsLeaf) {
 static BinaryBasicBlock::iterator
 insertInstructions(InstructionListType &Instrs, BinaryBasicBlock &BB,
                    BinaryBasicBlock::iterator Iter) {
+  GolangPass::annotateInstrumentationInstructions(Instrs, BB, Iter);
+
   for (MCInst &NewInst : Instrs) {
     Iter = BB.insertInstruction(Iter, NewInst);
     ++Iter;
@@ -398,6 +401,9 @@ bool Instrumentation::instrumentOneTarget(
     Iter = insertInstructions(CounterInstrs, FromBB, Iter);
     return true;
   }
+
+  GolangPass::annotateInstrumentationInstructions(CounterInstrs, *TargetBB,
+                                                  FromBB.begin());
   // Critical edge, create BB and put counter there
   SplitWorklist.emplace_back(&FromBB, TargetBB);
   SplitInstrs.emplace_back(std::move(CounterInstrs));

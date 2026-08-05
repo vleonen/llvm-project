@@ -2124,6 +2124,12 @@ Error RewriteInstance::readSpecialSections() {
 }
 
 void RewriteInstance::adjustCommandLineOptions() {
+  if (opts::GolangPass != opts::GV_NONE &&
+      !opts::SkipGolangFuncs.getNumOccurrences()) {
+    for (const std::string &Func : opts::DefaultSkipGolangFuncs)
+      opts::SkipGolangFuncs.addValue(Func);
+  }
+
   if (BC->isAArch64() && !BC->HasRelocations)
     errs() << "BOLT-WARNING: non-relocation mode for AArch64 is not fully "
               "supported\n";
@@ -2191,6 +2197,12 @@ void RewriteInstance::adjustCommandLineOptions() {
     opts::HotText = true;
   } else if (opts::HotText && !BC->HasRelocations) {
     errs() << "BOLT-WARNING: hot text is disabled in non-relocation mode\n";
+    opts::HotText = false;
+  }
+
+  if (opts::GolangPass != opts::GV_NONE && opts::HotText) {
+    errs() << "BOLT-WARNING: hot-text option is not compatible with golang. "
+              "Disabling hot-text.\n";
     opts::HotText = false;
   }
 
@@ -3319,6 +3331,9 @@ void RewriteInstance::initializeMetadataManager() {
   MetadataManager.registerRewriter(createPseudoProbeRewriter(*BC));
 
   MetadataManager.registerRewriter(createSDTRewriter(*BC));
+
+  if (opts::GolangPass != opts::GV_NONE)
+    MetadataManager.registerRewriter(createGolangMetadataRewriter(*BC));
 }
 
 void RewriteInstance::processMetadataPreCFG() {
@@ -5538,25 +5553,34 @@ void RewriteInstance::updateELFSymbolTable(
         NewSymbol.st_shndx =
             Function->getCodeSection(FF->getFragmentNum())->getIndex();
       } else {
-        // Check if the symbol belongs to moved data object and update it.
-        BinaryData *BD = (opts::Rewrite || !opts::ReorderData.empty())
+        // Check if the symbol belongs to data object and update it.
+        BinaryData *BD = (opts::Rewrite || !opts::ReorderData.empty() ||
+                          opts::GolangPass != opts::GV_NONE)
                              ? BC->getBinaryDataAtAddress(Symbol.st_value)
                              : nullptr;
-        if (BD && BD->isMoved() && !BD->isJumpTable() &&
-            (!BD->getSize() || !Symbol.st_size ||
-             Symbol.st_size == BD->getSize())) {
-          BinarySection &OutputSection = BD->getOutputSection();
-          if (OutputSection.getIndex()) {
-            LLVM_DEBUG(dbgs()
-                       << "BOLT-DEBUG: moving " << BD->getName() << " from "
-                       << *BC->getSectionNameForAddress(Symbol.st_value) << " ("
-                       << Symbol.st_shndx << ") to " << OutputSection.getName()
-                       << " (" << OutputSection.getIndex() << ")\n");
-            NewSymbol.st_shndx = OutputSection.getIndex();
-            NewSymbol.st_value = BD->getOutputAddress();
+        if (BD && !BD->isJumpTable()) {
+          if (BD->isMoved() && (!BD->getSize() || !Symbol.st_size ||
+                                Symbol.st_size == BD->getSize())) {
+            BinarySection &OutputSection = BD->getOutputSection();
+            if (OutputSection.getIndex()) {
+              LLVM_DEBUG(dbgs()
+                         << "BOLT-DEBUG: moving " << BD->getName() << " from "
+                         << *BC->getSectionNameForAddress(Symbol.st_value)
+                         << " (" << Symbol.st_shndx << ") to "
+                         << OutputSection.getName() << " ("
+                         << OutputSection.getIndex() << ")\n");
+              NewSymbol.st_shndx = OutputSection.getIndex();
+              NewSymbol.st_value = BD->getOutputAddress();
+            } else if (Symbol.st_shndx < ELF::SHN_LORESERVE) {
+              NewSymbol.st_shndx = getNewSectionIndex(Symbol.st_shndx);
+            }
           } else if (Symbol.st_shndx < ELF::SHN_LORESERVE) {
             NewSymbol.st_shndx = getNewSectionIndex(Symbol.st_shndx);
           }
+          if (opts::GolangPass != opts::GV_NONE &&
+              BD->getOutputSize() != BD->getSize() &&
+              BD->getOutputSize() != Symbol.st_size)
+            NewSymbol.st_size = BD->getOutputSize();
         } else {
           // Otherwise just update the section for the symbol.
           if (Symbol.st_shndx < ELF::SHN_LORESERVE)
@@ -6011,6 +6035,29 @@ void RewriteInstance::patchELFAllocatableRelaSections(
         RelOffset = RelOffset == 0 ? SectionAddress + Rel.Offset : RelOffset;
         if (Rel.Symbol) {
           SymbolIdx = getOutputDynamicSymbolIndex(Symbol);
+          if (!SymbolIdx && IsRelative) {
+            // The symbol is not part of the dynamic symbol table. This is
+            // expected for R_*_RELATIVE relocations created by BOLT passes
+            // (e.g. the Golang pass) that reference internal symbols. The
+            // dynamic linker applies such entries as load base + addend,
+            // hence resolve the symbol to its output address and fold it
+            // into the addend, making the entry symbol-less.
+            uint64_t SymbolValue =
+                Linker->lookupSymbol(Symbol->getName()).value_or(0);
+            if (!SymbolValue) {
+              if (BinaryData *BD = BC->getBinaryDataByName(Symbol->getName()))
+                SymbolValue =
+                    BD->isMoved() ? BD->getOutputAddress() : BD->getAddress();
+            }
+            if (SymbolValue) {
+              Addend += SymbolValue;
+            } else {
+              errs() << "BOLT-ERROR: unable to resolve symbol "
+                     << Symbol->getName()
+                     << " referenced by a relative dynamic relocation\n";
+              exit(1);
+            }
+          }
         } else {
           // Usually this case is used for R_*_(I)RELATIVE relocations
           // Check if it's end-of-section relocation first because they're
