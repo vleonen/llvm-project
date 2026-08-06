@@ -2,7 +2,13 @@
 // global data, and PC-relative relocations. Verifies that the rewritten
 // binary produces correct runtime output identical to the original.
 //
-// REQUIRES: system-linux
+// This test is AArch64-specific despite being plain C: syscall3() uses the
+// AArch64 syscall ABI (x8 register, svc #0) and AArch64 syscall numbers
+// (write=64, exit=93). It lives under test/AArch64 so %cflags targets
+// aarch64-pc-linux, and it executes the produced binaries, so it requires
+// a native (host == target) build.
+//
+// REQUIRES: system-linux, native, target-aarch64
 // RUN: %clang %cflags -nostdlib -ffreestanding -static -Wl,-q \
 // RUN:   -fuse-ld=lld -o %t.orig %s
 // RUN: llvm-bolt %t.orig -o %t.bolt -rewrite

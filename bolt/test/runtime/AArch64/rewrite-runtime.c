@@ -3,6 +3,11 @@
 // and string references, rewrites it with -rewrite, and verifies the
 // rewritten binary's exit code is 0.
 //
+// This test is AArch64-specific despite being plain C: syscall3() uses the
+// AArch64 syscall ABI (x8 register, svc #0) and AArch64 syscall numbers
+// (write=64, exit=93). It stays under test/runtime/AArch64, which only runs
+// on a native aarch64 host (host_arch + native + system-linux guards).
+//
 // REQUIRES: system-linux
 //
 // RUN: %clang %cflags -nostdlib -ffreestanding -static -Wl,-q \
