@@ -1679,8 +1679,8 @@ extern "C" __attribute((naked)) void __bolt_instr_indirect_call()
 #else
   // clang-format off
   __asm__ __volatile__(SAVE_ALL
-                       "mov 0xa0(%%rsp), %%rdi\n"
-                       "mov 0x98(%%rsp), %%rsi\n"
+                       "mov 0x98(%%rsp), %%rdi\n"
+                       "mov 0x90(%%rsp), %%rsi\n"
                        "call instrumentIndirectCall\n"
                        RESTORE_ALL
                        "ret\n"
