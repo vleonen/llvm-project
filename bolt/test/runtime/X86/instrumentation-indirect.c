@@ -51,6 +51,23 @@ RUN: llvm-bolt %t.exe --instrument --instrumentation-file=%t.fdata \
 RUN:   --instrumentation-wait-forks=1 \
 RUN:   -o %t.instrumented
 
+# Validate the new instrumentation snippet layout.
+RUN: llvm-objdump --disassemble-symbols=__bolt_instr_ind_call_handler \
+RUN:   %t.instrumented | FileCheck %s --check-prefix=CHECK-EXIT-HANDLER
+RUN: llvm-objdump --disassemble-symbols=bar %t.instrumented \
+RUN:   | FileCheck %s --check-prefix=CHECK-SNIPPET
+
+# The exit handler is now just a return.
+CHECK-EXIT-HANDLER: __bolt_instr_ind_call_handler>:
+CHECK-EXIT-HANDLER-NEXT: retq
+
+# The call site preserves flags and the first argument register, records the
+# target/id via the trampoline, then re-executes the original indirect call.
+CHECK-SNIPPET: pushfq
+CHECK-SNIPPET: pushq %rdi
+CHECK-SNIPPET: callq {{.*}}__bolt_instr_ind_call_handler_func
+CHECK-SNIPPET: callq *%r11
+
 # Instrumented program needs to finish returning zero
 RUN: %t.instrumented | FileCheck %s -check-prefix=CHECK-OUTPUT
 

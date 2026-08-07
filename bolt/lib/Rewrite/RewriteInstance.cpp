@@ -2466,8 +2466,9 @@ void RewriteInstance::adjustCommandLineOptions() {
 
   // Mirror the adjusted mode options into the target builder so that
   // target-library code can gate on them without linking the options
-  // library. (GolangMode is mirrored once the -golang option exists.)
+  // library. The -golang option exists by now, so mirror GolangMode too.
   BC->MIB->KeepNopsMode = opts::KeepNops;
+  BC->MIB->GolangMode = opts::GolangPass != opts::GV_NONE;
 }
 
 namespace {

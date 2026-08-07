@@ -3111,6 +3111,14 @@ public:
       setTailCall(Inst);
   }
 
+  void createDirectBranch(MCInst &Inst, const MCSymbol *Target,
+                          MCContext *Ctx) override {
+    Inst.clear();
+    Inst.setOpcode(X86::JMP_4);
+    Inst.addOperand(MCOperand::createExpr(
+        MCSymbolRefExpr::create(Target, *Ctx)));
+  }
+
   void createShortJmp(InstructionListType &Seq, const MCSymbol *Target,
                       MCContext *Ctx, bool IsTailCall) override {
     Seq.clear();
@@ -3357,88 +3365,120 @@ public:
                                                      MCSymbol *HandlerFuncAddr,
                                                      size_t CallSiteID,
                                                      MCContext *Ctx) override {
-    // Check if the target address expression used in the original indirect call
-    // uses the stack pointer, which we are going to clobber.
-    static BitVector SPAliases(getAliases(X86::RSP));
-    bool UsesSP = any_of(useOperands(CallInst), [&](const MCOperand &Op) {
-      return Op.isReg() && SPAliases[Op.getReg()];
-    });
-
+    const bool IsTailCall = isTailCall(CallInst);
+    // Zero-scratch-register instrumentation sequence. No general-purpose
+    // register is safe as a scratch at an arbitrary indirect call site:
+    // in the Go internal ABI arguments live in rax rcx rbx rdi rsi r8 r9
+    // r10 r11, and in the SysV ABI callee-saved registers (rbx rbp r12-r15)
+    // may hold live caller values (runtime.vgetrandom1, for example, keeps
+    // its stack pointer in r12 across a vDSO call). Instead the call
+    // target is pushed with its ORIGINAL operand (push %reg or pushq mem)
+    // and the call site id is pushed as a 32-bit immediate - no register
+    // is read or written between the saves and the handler call except
+    // rsp (balanced) and flags (restored). After the handler returns, all
+    // saved registers are restored and the ORIGINAL call instruction is
+    // re-executed with its original target operand.
+    //
+    //   pushfq
+    //   push rax rcx rdx rsi rdi r8 r9 r10 r11   ; live-arg registers
+    //   push <target>                             ; original call operand
+    //   push $CallSiteID                          ; imm32
+    //   callq HandlerFuncAddr                     ; always returns here
+    //   add $16, %rsp                             ; discard id + target copy
+    //   pop r11 r10 r9 r8 rdi rsi rdx rcx rax
+    //   popfq
+    //   <original call/jmp, unchanged>
     InstructionListType Insts;
-    MCPhysReg TempReg = getIntArgRegister(0);
-    // Code sequence used to enter indirect call instrumentation helper:
-    //   push %rdi
-    //   add $8, %rsp       ;; $rsp may be used in target, so fix it to prev val
-    //   movq target, %rdi  ;; via convertIndirectCallTargetToLoad
-    //   sub $8, %rsp       ;; restore correct stack value
-    //   push %rdi
-    //   movq $CallSiteID, %rdi
-    //   push %rdi
-    //   callq/jmp HandlerFuncAddr
-    Insts.emplace_back();
-    createPushRegister(Insts.back(), TempReg, 8);
-    if (UsesSP) { // Only adjust SP if we really need to
-      Insts.emplace_back();
-      createStackPointerDecrement(Insts.back(), 8, /*NoFlagsClobber=*/false);
-    }
-    Insts.emplace_back(CallInst);
-    // Insts.back() and CallInst now share the same annotation instruction.
-    // Strip it from Insts.back(), only preserving tail call annotation.
-    stripAnnotations(Insts.back(), /*KeepTC=*/true);
-    convertIndirectCallToLoad(Insts.back(), TempReg);
-    if (UsesSP) {
-      Insts.emplace_back();
-      createStackPointerIncrement(Insts.back(), 8, /*NoFlagsClobber=*/false);
-    }
-    Insts.emplace_back();
-    createPushRegister(Insts.back(), TempReg, 8);
-    InstructionListType LoadImm = createLoadImmediate(TempReg, CallSiteID);
-    Insts.insert(Insts.end(), LoadImm.begin(), LoadImm.end());
-    Insts.emplace_back();
-    createPushRegister(Insts.back(), TempReg, 8);
 
-    MCInst &NewCallInst = Insts.emplace_back();
-    createDirectCall(NewCallInst, HandlerFuncAddr, Ctx, isTailCall(CallInst));
+    Insts.emplace_back();
+    createPushFlags(Insts.back(), 8);
 
-    // Carry over metadata including tail call marker if present.
-    stripAnnotations(NewCallInst);
-    moveAnnotations(std::move(CallInst), NewCallInst);
+    static const MCPhysReg Saved[] = {X86::RAX, X86::RCX, X86::RDX,
+                                      X86::RSI, X86::RDI, X86::R8,
+                                      X86::R9,  X86::R10, X86::R11};
+    for (MCPhysReg Reg : Saved) {
+      Insts.emplace_back();
+      createPushRegister(Insts.back(), Reg, 8);
+    }
+
+    // Push the call target using the original operand - no scratch needed.
+    // Exception: when the memory operand is based on %rsp (e.g.
+    // "callq *0x18(%rsp)"), pushing it directly would read through the
+    // already-decremented stack pointer. Load it into r11 instead (its
+    // original value is already saved on the stack and restored below),
+    // adjusting the displacement by the 0x50 bytes pushed so far
+    // (flags + 9 registers).
+    if (CallInst.getOpcode() == X86::CALL64r ||
+        CallInst.getOpcode() == X86::JMP32r) {
+      Insts.emplace_back();
+      createPushRegister(Insts.back(), CallInst.getOperand(0).getReg(), 8);
+    } else if (CallInst.getOperand(0).getReg() == X86::RSP) {
+      MCInst &Load = Insts.emplace_back();
+      Load.setOpcode(X86::MOV64rm);
+      Load.addOperand(MCOperand::createReg(X86::R11));
+      Load.addOperand(CallInst.getOperand(0)); // base = rsp
+      Load.addOperand(CallInst.getOperand(1)); // scale
+      Load.addOperand(CallInst.getOperand(2)); // index
+      Load.addOperand(
+          MCOperand::createImm(CallInst.getOperand(3).getImm() + 0x50));
+      Load.addOperand(CallInst.getOperand(4)); // segment
+      Insts.emplace_back();
+      createPushRegister(Insts.back(), X86::R11, 8);
+    } else {
+      // CALL64m / JMP32m: copy the 5 memory-addressing operands.
+      MCInst &Push = Insts.emplace_back();
+      Push.setOpcode(X86::PUSH64rmm);
+      for (unsigned OpI = 0; OpI < 5; ++OpI)
+        Push.addOperand(CallInst.getOperand(OpI));
+    }
+
+    // push $CallSiteID (imm32 sign-extended; ids are small).
+    MCInst &PushID = Insts.emplace_back();
+    PushID.setOpcode(X86::PUSH64i32);
+    PushID.addOperand(MCOperand::createImm(CallSiteID));
+
+    Insts.emplace_back();
+    createDirectCall(Insts.back(), HandlerFuncAddr, Ctx, /*IsTailCall=*/false);
+
+    // add $16, %rsp (discard id + pushed target copy)
+    Insts.emplace_back(MCInstBuilder(X86::ADD64ri8)
+                           .addReg(X86::RSP)
+                           .addReg(X86::RSP)
+                           .addImm(16));
+
+    for (auto It = std::rbegin(Saved); It != std::rend(Saved); ++It) {
+      Insts.emplace_back();
+      createPopRegister(Insts.back(), *It, 8);
+    }
+    Insts.emplace_back();
+    createPopFlags(Insts.back(), 8);
+
+    // Original indirect call, executed with all registers restored and
+    // its original target operand (register or memory).
+    MCInst &NewCallInst = Insts.emplace_back(CallInst);
+    stripAnnotations(NewCallInst, /*KeepTC=*/true);
+    (void)IsTailCall;
 
     return Insts;
   }
 
   InstructionListType createInstrumentedIndCallHandlerExitBB() const override {
-    const MCPhysReg TempReg = getIntArgRegister(0);
-    // We just need to undo the sequence created for every ind call in
-    // instrumentIndirectTarget(), which can be accomplished minimally with:
-    //   popfq
-    //   pop %rdi
-    //   add $16, %rsp
-    //   xchg (%rsp), %rdi
-    //   jmp *-8(%rsp)
-    InstructionListType Insts(5);
-    createPopFlags(Insts[0], 8);
-    createPopRegister(Insts[1], TempReg, 8);
-    createStackPointerDecrement(Insts[2], 16, /*NoFlagsClobber=*/false);
-    createSwap(Insts[3], TempReg, X86::RSP, 0);
-    createIndirectBranch(Insts[4], X86::RSP, -8);
+    // Code sequence for instrumented indirect call handler:
+    //   ret
+    //
+    // The instrumented call site re-executes the original indirect call after
+    // the trampoline returns, so the exit handler only needs to return.
+    InstructionListType Insts;
+    Insts.emplace_back();
+    createReturn(Insts.back());
     return Insts;
   }
 
   InstructionListType
   createInstrumentedIndTailCallHandlerExitBB() const override {
-    const MCPhysReg TempReg = getIntArgRegister(0);
-    // Same thing as above, but for tail calls
-    //   popfq
-    //   add $16, %rsp
-    //   pop %rdi
-    //   jmp *-16(%rsp)
-    InstructionListType Insts(4);
-    createPopFlags(Insts[0], 8);
-    createStackPointerDecrement(Insts[1], 16, /*NoFlagsClobber=*/false);
-    createPopRegister(Insts[2], TempReg, 8);
-    createIndirectBranch(Insts[3], X86::RSP, -16);
-    return Insts;
+    // Same as the call exit handler: the tail-call site re-executes the
+    // original indirect jump after the trampoline returns.
+    return createInstrumentedIndCallHandlerExitBB();
   }
 
   InstructionListType
@@ -3446,17 +3486,14 @@ public:
                                           const MCSymbol *IndCallHandler,
                                           MCContext *Ctx) override {
     const MCPhysReg TempReg = getIntArgRegister(0);
-    // Code sequence used to check whether InstrTampoline was initialized
+    // Code sequence used to check whether InstrTrampoline was initialized
     // and call it if so, returns via IndCallHandler.
-    //   pushfq
     //   mov    InstrTrampoline,%rdi
     //   cmp    $0x0,%rdi
     //   je     IndCallHandler
     //   callq  *%rdi
     //   jmpq   IndCallHandler
     InstructionListType Insts;
-    Insts.emplace_back();
-    createPushFlags(Insts.back(), 8);
     Insts.emplace_back();
     createMove(Insts.back(), InstrTrampoline, TempReg, Ctx);
     InstructionListType cmpJmp = createCmpJE(TempReg, 0, IndCallHandler, Ctx);
@@ -3465,7 +3502,7 @@ public:
     Insts.back().setOpcode(X86::CALL64r);
     Insts.back().addOperand(MCOperand::createReg(TempReg));
     Insts.emplace_back();
-    createDirectCall(Insts.back(), IndCallHandler, Ctx, /*IsTailCall*/ true);
+    createDirectBranch(Insts.back(), IndCallHandler, Ctx);
     return Insts;
   }
 
