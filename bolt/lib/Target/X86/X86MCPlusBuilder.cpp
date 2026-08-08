@@ -1274,6 +1274,17 @@ public:
     case X86::ADD64ri8:
       Sign = -1;
       break;
+    case X86::LEA64r: {
+      const MCInstrDesc &MCII = Info->get(Inst.getOpcode());
+      for (int I = 0, E = MCII.getNumDefs(); I != E; ++I) {
+        const MCOperand &Operand = Inst.getOperand(I);
+        if (Operand.isReg() && Operand.getReg() == X86::RSP) {
+          assert(Inst.getOperand(4).isImm() && "unexpected operand");
+          return -static_cast<int>(Inst.getOperand(4).getImm());
+        }
+      }
+      return 0;
+    }
     }
 
     const MCInstrDesc &MCII = Info->get(Inst.getOpcode());
