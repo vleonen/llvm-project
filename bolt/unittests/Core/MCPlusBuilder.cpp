@@ -339,6 +339,107 @@ TEST_P(MCPlusBuilderTester, X86_CmpJNE) {
   ASSERT_EQ(II->getOperand(1).getImm(), X86::COND_NE);
 }
 
+TEST_P(MCPlusBuilderTester, GetStackAdjustmentSubAdd) {
+  if (GetParam() != Triple::x86_64)
+    GTEST_SKIP();
+
+  MCInst SubInst;
+  SubInst.setOpcode(X86::SUB64ri8);
+  SubInst.addOperand(MCOperand::createReg(X86::RSP));
+  SubInst.addOperand(MCOperand::createReg(X86::RSP));
+  SubInst.addOperand(MCOperand::createImm(128));
+  ASSERT_EQ(BC->MIB->getStackAdjustment(SubInst), 128);
+
+  MCInst AddInst;
+  AddInst.setOpcode(X86::ADD64ri8);
+  AddInst.addOperand(MCOperand::createReg(X86::RSP));
+  AddInst.addOperand(MCOperand::createReg(X86::RSP));
+  AddInst.addOperand(MCOperand::createImm(128));
+  ASSERT_EQ(BC->MIB->getStackAdjustment(AddInst), -128);
+}
+
+TEST_P(MCPlusBuilderTester, GetStackAdjustmentLeaIncrement) {
+  if (GetParam() != Triple::x86_64)
+    GTEST_SKIP();
+
+  MCInst Inst;
+  Inst.setOpcode(X86::LEA64r);
+  Inst.addOperand(MCOperand::createReg(X86::RSP));
+  Inst.addOperand(MCOperand::createReg(X86::RSP));
+  Inst.addOperand(MCOperand::createImm(1));
+  Inst.addOperand(MCOperand::createReg(X86::NoRegister));
+  Inst.addOperand(MCOperand::createImm(-128));
+  Inst.addOperand(MCOperand::createReg(X86::NoRegister));
+  ASSERT_EQ(BC->MIB->getStackAdjustment(Inst), 128);
+  ASSERT_TRUE(BC->MIB->isStackAdjustment(Inst));
+}
+
+TEST_P(MCPlusBuilderTester, GetStackAdjustmentLeaDecrement) {
+  if (GetParam() != Triple::x86_64)
+    GTEST_SKIP();
+
+  MCInst Inst;
+  Inst.setOpcode(X86::LEA64r);
+  Inst.addOperand(MCOperand::createReg(X86::RSP));
+  Inst.addOperand(MCOperand::createReg(X86::RSP));
+  Inst.addOperand(MCOperand::createImm(1));
+  Inst.addOperand(MCOperand::createReg(X86::NoRegister));
+  Inst.addOperand(MCOperand::createImm(128));
+  Inst.addOperand(MCOperand::createReg(X86::NoRegister));
+  ASSERT_EQ(BC->MIB->getStackAdjustment(Inst), -128);
+  ASSERT_TRUE(BC->MIB->isStackAdjustment(Inst));
+}
+
+TEST_P(MCPlusBuilderTester, GetStackAdjustmentLeaNonRspDestination) {
+  if (GetParam() != Triple::x86_64)
+    GTEST_SKIP();
+
+  MCInst Inst;
+  Inst.setOpcode(X86::LEA64r);
+  Inst.addOperand(MCOperand::createReg(X86::R10));
+  Inst.addOperand(MCOperand::createReg(X86::RSP));
+  Inst.addOperand(MCOperand::createImm(1));
+  Inst.addOperand(MCOperand::createReg(X86::NoRegister));
+  Inst.addOperand(MCOperand::createImm(-16384));
+  Inst.addOperand(MCOperand::createReg(X86::NoRegister));
+  ASSERT_EQ(BC->MIB->getStackAdjustment(Inst), 0);
+  ASSERT_FALSE(BC->MIB->isStackAdjustment(Inst));
+}
+
+TEST_P(MCPlusBuilderTester, CreateStackPointerIncrement) {
+  if (GetParam() != Triple::x86_64)
+    GTEST_SKIP();
+
+  MCInst Inst;
+  BC->MIB->createStackPointerIncrement(Inst, 128, true);
+  ASSERT_EQ(Inst.getOpcode(), X86::LEA64r);
+  ASSERT_EQ(Inst.getOperand(0).getReg(), X86::RSP);
+  ASSERT_EQ(Inst.getOperand(1).getReg(), X86::RSP);
+  ASSERT_EQ(Inst.getOperand(2).getImm(), 1);
+  ASSERT_EQ(Inst.getOperand(3).getReg(), X86::NoRegister);
+  ASSERT_EQ(Inst.getOperand(4).getImm(), -128);
+  ASSERT_EQ(Inst.getOperand(5).getReg(), X86::NoRegister);
+  ASSERT_EQ(BC->MIB->getStackAdjustment(Inst), 128);
+  ASSERT_TRUE(BC->MIB->isStackAdjustment(Inst));
+}
+
+TEST_P(MCPlusBuilderTester, CreateStackPointerDecrement) {
+  if (GetParam() != Triple::x86_64)
+    GTEST_SKIP();
+
+  MCInst Inst;
+  BC->MIB->createStackPointerDecrement(Inst, 128, true);
+  ASSERT_EQ(Inst.getOpcode(), X86::LEA64r);
+  ASSERT_EQ(Inst.getOperand(0).getReg(), X86::RSP);
+  ASSERT_EQ(Inst.getOperand(1).getReg(), X86::RSP);
+  ASSERT_EQ(Inst.getOperand(2).getImm(), 1);
+  ASSERT_EQ(Inst.getOperand(3).getReg(), X86::NoRegister);
+  ASSERT_EQ(Inst.getOperand(4).getImm(), 128);
+  ASSERT_EQ(Inst.getOperand(5).getReg(), X86::NoRegister);
+  ASSERT_EQ(BC->MIB->getStackAdjustment(Inst), -128);
+  ASSERT_TRUE(BC->MIB->isStackAdjustment(Inst));
+}
+
 #endif // X86_AVAILABLE
 
 TEST_P(MCPlusBuilderTester, Annotation) {
