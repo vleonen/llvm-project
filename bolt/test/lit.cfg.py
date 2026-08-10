@@ -75,6 +75,11 @@ if config.gnu_ld:
 if lit.util.which("fuser"):
     config.available_features.add("fuser")
 
+# Feature for tests that execute an x86_64 binary: cross-compilation alone
+# is not enough, the host must be able to run the result.
+if config.host_arch in ["x86", "X86", "x86_64"]:
+    config.available_features.add("x86_64-host")
+
 llvm_config.use_default_substitutions()
 
 llvm_config.config.environment["CLANG"] = config.bolt_clang
