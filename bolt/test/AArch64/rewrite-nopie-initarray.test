@@ -1,0 +1,24 @@
+## Regression test: -rewrite must not crash on non-PIE dynamic binaries and
+## must patch absolute data pointers that have no dynamic relocations.
+##
+## Two bugs are covered:
+##  1. patchELFSymTabs aborted with "Cannot locate fragment containing
+##     secondary entrypoint" for STT_FUNC symbols pointing inside a PLT
+##     (non-PIE links resolve undefined-function symbols to their PLT
+##     stub): PLT functions are emitted without a CFG, so address
+##     translation returned 0. The address now maps linearly inside the
+##     PLT section.
+##  2. Non-PIE binaries store link-time-resolved absolute pointers (e.g.
+##     in .init_array) with no dynamic relocations; when -rewrite moves
+##     the sections the stale absolute values must be patched in the
+##     output from the -q .rela.* records.
+##
+## The test asserts that llvm-bolt completes and that the .init_array
+## pointer in the output references the new .text address of the function.
+
+# REQUIRES: system-linux
+
+# RUN: %clang %cflags -shared -fPIC %S/Inputs/rewrite-nopie-stub.c -o %t.so
+# RUN: %clang %cflags -O0 -Wl,-q -no-pie -fuse-ld=lld %S/Inputs/rewrite-nopie-initarray.c %t.so -o %t.orig -Wl,-e,_start
+# RUN: llvm-bolt %t.orig -o %t.bolt -rewrite
+# RUN: TEXT=`llvm-readelf -SW %t.bolt | awk '$3==".text" {print $5}'` && INIT=`llvm-readelf -x .init_array %t.bolt | awk '/0x0/ {w=$2; print "0x" substr(w,7,2) substr(w,5,2) substr(w,3,2) substr(w,1,2)}'` && python3 -c "import sys; t=int('$TEXT',16); v=int('$INIT',16); sys.exit(0 if t <= v < t + 0x10000 else 1)" && echo init-patched
