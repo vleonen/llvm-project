@@ -1,0 +1,47 @@
+# A copied ADRP base defeats the pairing scan. More than three pages of
+# actual GOT entries repeat low offsets on different pages. Check every loaded
+# value, not only their sum, so a permutation of slots cannot pass.
+# Check aligned and unaligned GOT starts; rewrite preserves their page phase.
+# The fixed section address separates RELRO sections, so disable RELRO only
+# for these artificial layouts.
+# REQUIRES: system-linux
+# RUN: split-file %s %t
+# RUN: %python %t/generate.py > %t/input.s
+# RUN: %clang %cflags %t/driver.c -ldl -o %t/driver
+# RUN: %clang %cflags -shared -fPIC %t/input.s -Wl,-q,-z,norelro \
+# RUN:   -Wl,--section-start=.got=0x400000 -o %t/aligned.so
+# RUN: %t/driver %t/aligned.so
+# RUN: llvm-bolt %t/aligned.so -rewrite -o %t/aligned.bolt.so
+# RUN: %t/driver %t/aligned.bolt.so
+# RUN: %clang %cflags -shared -fPIC %t/input.s -Wl,-q,-z,norelro \
+# RUN:   -Wl,--section-start=.got=0x400a00 -o %t/phase.so
+# RUN: %t/driver %t/phase.so
+# RUN: llvm-bolt %t/phase.so -rewrite -o %t/phase.bolt.so
+# RUN: %t/driver %t/phase.bolt.so
+
+#--- generate.py
+print(".text\n.globl get_value\n.type get_value,%function\nget_value:\nmov w0, wzr")
+for i in range(1600):
+    print(f"adrp x8, :got:value_{i}\nmov x9, x8")
+    print(f"ldr x10, [x9, :got_lo12:value_{i}]\nldr w11, [x10]")
+    print(f"cmp w11, #{i + 1}\nb.ne .Lfail\nadd w0, w0, w11")
+print("ret\n.Lfail:\nmov w0, #-1\nret")
+print(".size get_value, .-get_value\n.data\n.p2align 3")
+for i in range(1600):
+    print(f".globl value_{i}\n.type value_{i},%object")
+    print(f"value_{i}: .word {i + 1}\n.size value_{i},4")
+print('.section .note.GNU-stack,"",%progbits')
+
+#--- driver.c
+#include <dlfcn.h>
+int main(int argc, char **argv) {
+  if (argc != 2)
+    return 1;
+  void *h = dlopen(argv[1], RTLD_NOW);
+  if (!h)
+    return 2;
+  int (*f)(void) = (int (*)(void))dlsym(h, "get_value");
+  if (!f || f() != 1600 * 1601 / 2)
+    return 3;
+  return dlclose(h) != 0;
+}

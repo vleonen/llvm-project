@@ -1,0 +1,31 @@
+# Verify that -rewrite keeps weak undefined dynamic symbols undefined on
+# AArch64 when linked with GNU ld.
+#
+# GNU ld gives weak undefined functions a non-zero st_value in .dynsym
+# pointing at their PLT stub (e.g. the C++ personality routine
+# __gxx_personality_v0; lld leaves the value zero, so this variant needs
+# bfd). -rewrite used to rewrite such an entry into a *defined* symbol in
+# the .plt section: the dynamic linker searches the main executable
+# first, resolved the symbol's JUMP_SLOT to the local PLT stub, and the
+# first throw then spun forever in a PLT self-loop (the stub jumps back
+# through the very GOT slot being resolved).
+#
+# With the fix the entry stays undefined, the JUMP_SLOT resolves to the
+# real implementation in libstdc++, and the rewritten binary prints the
+# regular catch output.
+
+# REQUIRES: gnu_ld
+
+# RUN: %clangxx %cxxflags -g -O1 -Wl,-q -no-pie -fuse-ld=bfd \
+# RUN:   %S/Inputs/rewrite-exceptions.cpp -o %t.orig
+## Sanity-check the input shape: undefined entry with a non-zero value.
+# RUN: llvm-readelf --dyn-syms %t.orig | FileCheck %s --check-prefix=CHECK-INPUT
+# CHECK-INPUT: UND __gxx_personality_v0
+# RUN: llvm-bolt %t.orig -o %t.bolt -rewrite
+# RUN: llvm-readelf --dyn-syms %t.bolt | FileCheck %s --check-prefix=CHECK-DYNSYM
+# CHECK-DYNSYM: UND __gxx_personality_v0
+# RUN: %t.bolt | FileCheck %s
+
+# CHECK: catch 2
+# CHECK: catch 1
+# CHECK: caught ExcC
