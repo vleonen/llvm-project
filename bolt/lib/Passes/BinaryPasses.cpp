@@ -352,7 +352,7 @@ void EliminateUnreachableBlocks::runOnFunctions(BinaryContext &BC) {
   };
 
   ParallelUtilities::PredicateTy SkipPredicate = [&](const BinaryFunction &BF) {
-    return !shouldOptimize(BF) || BF.getLayout().block_empty();
+    return !shouldOptimize(BF) || BF.getLayout().block_empty() || BF.isGolang();
   };
 
   ParallelUtilities::runOnEachFunction(
