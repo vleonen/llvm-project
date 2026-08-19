@@ -3701,11 +3701,13 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
   PHDRTableAddress = BaseAddress + PHDRTableOffset;
 
   // Count output program headers: PT_PHDR + one per input segment (excluding
-  // PT_PHDR which we create ourselves).
+  // PT_PHDR which we create ourselves). Reserve one extra entry for a
+  // potential stray-section LOAD segment created later in this function.
   unsigned Phnum = 1; // PT_PHDR
   for (const ProgramHeader &Phdr : BC->InputSegments)
     if (Phdr.p_type != ELF::PT_PHDR)
       ++Phnum;
+  ++Phnum; // Reserve for stray-section LOAD segment
 
   BC->MaxPHDRSize = Phnum * sizeof(ELF64LE::Phdr);
   NextAvailableAddress = BaseAddress + PHDRTableOffset + BC->MaxPHDRSize;
@@ -3931,34 +3933,63 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
   }
 
   // Handle stray allocatable sections that were not claimed by any input
-  // segment (e.g. zero-size sections outside segment address ranges).
-  // Place them at the end of the last segment's file offset.
-  for (BinarySection &Section : BC->allocatableSections()) {
-    if (Section.isLinkOnly())
-      continue;
-    if (!opts::Rewrite && !Section.hasValidSectionID())
-      continue;
-    if (MappedSections.count(&Section))
-      continue;
-    if (Section.getOutputAddress())
-      continue; // Already mapped by some other path
-
-    const uint64_t Alignment = Section.getAlignment();
-    NextAvailableAddress = alignTo(NextAvailableAddress, Alignment);
-    NextAvailableOffset = alignTo(NextAvailableOffset, Alignment);
-
-    const uint64_t Size = Section.getOutputSize();
-    Section.setOutputAddress(NextAvailableAddress);
-    Section.setOutputFileOffset(NextAvailableOffset);
-    BC->OutputAddressToOffsetMap[NextAvailableAddress] = NextAvailableOffset;
-    if (Section.hasValidSectionID())
-      MapSection(Section, NextAvailableAddress);
-
-    if (!Section.isBSS()) {
-      NextAvailableOffset += Size;
+  // segment (e.g. .eh_frame emitted by MCStreamer without a matching input
+  // segment). Place them in a new PT_LOAD segment so they are mapped at
+  // runtime. Without this, sections like .eh_frame end up outside all LOAD
+  // segments, causing crashes when code references them.
+  {
+    std::vector<BinarySection *> StraySections;
+    for (BinarySection &Section : BC->allocatableSections()) {
+      if (Section.isLinkOnly())
+        continue;
+      if (!opts::Rewrite && !Section.hasValidSectionID())
+        continue;
+      if (MappedSections.count(&Section))
+        continue;
+      if (Section.getOutputAddress())
+        continue;
+      if (Section.getOutputSize() == 0 && !Section.isVirtual())
+        continue;
+      StraySections.push_back(&Section);
     }
-    NextAvailableAddress += Size;
-    MappedSections.insert(&Section);
+
+    if (!StraySections.empty()) {
+      const uint64_t StrayAlign = BC->PageAlign;
+      NextAvailableAddress = alignTo(NextAvailableAddress, StrayAlign);
+      NextAvailableOffset = alignTo(NextAvailableOffset, StrayAlign);
+      const uint64_t StrayStartAddress = NextAvailableAddress;
+      const uint64_t StrayStartOffset = NextAvailableOffset;
+      unsigned SegmentFlags = ELF::PF_R;
+
+      for (BinarySection *Section : StraySections) {
+        const uint64_t Alignment = Section->getAlignment();
+        NextAvailableAddress = alignTo(NextAvailableAddress, Alignment);
+        NextAvailableOffset = alignTo(NextAvailableOffset, Alignment);
+
+        const uint64_t Size = Section->isVirtual()
+                                  ? Section->getSize()
+                                  : Section->getOutputSize();
+        Section->setOutputAddress(NextAvailableAddress);
+        Section->setOutputFileOffset(NextAvailableOffset);
+        BC->OutputAddressToOffsetMap[NextAvailableAddress] = NextAvailableOffset;
+        if (Section->hasValidSectionID())
+          MapSection(*Section, NextAvailableAddress);
+
+        if (Section->getELFFlags() & ELF::SHF_WRITE)
+          SegmentFlags |= ELF::PF_W;
+
+        if (!Section->isBSS())
+          NextAvailableOffset += Size;
+        NextAvailableAddress += Size;
+        MappedSections.insert(Section);
+      }
+
+      const uint64_t FileSize = NextAvailableOffset - StrayStartOffset;
+      const uint64_t MemSize = NextAvailableAddress - StrayStartAddress;
+      BC->OutputSegments.emplace_back(
+          ELF::PT_LOAD, SegmentFlags, StrayStartOffset, StrayStartAddress,
+          StrayStartAddress, FileSize, MemSize, StrayAlign);
+    }
   }
 
   // Handle non-LOAD segments (PT_GNU_STACK, PT_INTERP, etc.).
