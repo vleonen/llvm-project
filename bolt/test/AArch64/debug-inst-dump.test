@@ -1,0 +1,19 @@
+## Regression test: llvm-bolt -debug must not crash when dumping
+## instructions that carry MCPlus annotations.
+##
+## BOLT appends a null Inst-kind marker operand to every annotated
+## instruction (MCPlusBuilder::setAnnotationOpValue). MCOperand::print
+## dereferenced the marker operand unconditionally, so any
+## LLVM_DEBUG(MCInst::dump()) of an annotated instruction crashed with
+## SIGSEGV. The jump table in this test drives the indirect-branch
+## analysis (computeLocalUDChain) which dumps annotated instructions,
+## reproducing the crash: llvm-bolt used to die during disassembly and
+## now completes. Found with -rewrite -debug on redis-server; the same
+## guard protects the raw dump() sites in ShrinkWrapping, AllocCombiner
+## and FrameOptimizer.
+
+# REQUIRES: system-linux
+
+# RUN: %clang %cflags -O2 -Wl,-q -fuse-ld=lld -nostartfiles -e _start \
+# RUN:   %S/Inputs/debug-inst-dump.c -o %t.orig
+# RUN: llvm-bolt %t.orig -o /dev/null -rewrite -debug 2>/dev/null
