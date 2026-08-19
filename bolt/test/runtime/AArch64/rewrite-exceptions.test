@@ -1,0 +1,46 @@
+# Verify that exception handling works after -rewrite on AArch64.
+# The test rewrites a C++ binary that throws and catches exceptions in
+# nested try blocks; correct behavior requires the regenerated .eh_frame,
+# .eh_frame_hdr and .gcc_except_table (LSDA) to be consistent with the
+# relocated code. Also verifies the -keep-section-order variant.
+
+# REQUIRES: system-linux
+
+# RUN: %clangxx %cxxflags -g -O1 -Wl,-q %S/Inputs/rewrite-exceptions.cpp -o %t.orig
+# RUN: %t.orig | FileCheck %s --check-prefix=CHECK-ORIG
+# RUN: llvm-bolt %t.orig -o %t.bolt -rewrite
+# RUN: %t.bolt | FileCheck %s
+# RUN: llvm-readelf -S %t.bolt 2>&1 | FileCheck %s --check-prefix=CHECK-SEC
+# RUN: llvm-bolt %t.orig -o %t.bolt.kso -rewrite -keep-section-order
+# RUN: %t.bolt.kso | FileCheck %s
+
+## Non-PIE variant: exercises PLT lazy binding through the rewritten PLT
+## and .got.plt, and the undefined-with-PLT-value dynamic symbols the
+## linker emits for weak undefined functions (e.g. the C++ personality
+## routine). Previously the rewritten binary hung in an infinite PLT
+## self-loop on the first throw.
+# RUN: %clangxx %cxxflags -g -O1 -Wl,-q -no-pie %S/Inputs/rewrite-exceptions.cpp -o %t.nopie.orig
+# RUN: llvm-bolt %t.nopie.orig -o %t.nopie.bolt -rewrite
+# RUN: %t.nopie.bolt | FileCheck %s
+# RUN: llvm-bolt %t.nopie.orig -o %t.nopie.kso -rewrite -keep-section-order
+# RUN: %t.nopie.kso | FileCheck %s
+## The personality routine is a weak undefined dynamic symbol (undefined
+## with a non-zero st_value pointing at its PLT stub under GNU ld). It
+## must stay undefined after -rewrite: a defined entry would make the
+## dynamic linker resolve its JUMP_SLOT to the local PLT stub - an
+## infinite loop on the first throw.
+# RUN: llvm-readelf --dyn-syms %t.nopie.bolt 2>&1 | FileCheck %s --check-prefix=CHECK-DYNSYM
+# CHECK-DYNSYM: UND __gxx_personality_v0
+
+# CHECK-ORIG: catch 2
+# CHECK-ORIG: catch 1
+# CHECK-ORIG: caught ExcC
+
+# CHECK: catch 2
+# CHECK: catch 1
+# CHECK: caught ExcC
+
+## Unwind data must be present and non-trivial in the output.
+# CHECK-SEC: .eh_frame_hdr
+# CHECK-SEC: .eh_frame
+# CHECK-SEC: .gcc_except_table
