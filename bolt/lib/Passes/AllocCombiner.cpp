@@ -69,6 +69,11 @@ void AllocCombinerPass::combineAdjustments(BinaryFunction &BF) {
       if (isIndifferentToSP(Inst, BC))
         continue; // Skip updating Prev
 
+      if (BC.MIB->isPush(Inst) || BC.MIB->isPop(Inst)) {
+        Prev = &Inst;
+        continue;
+      }
+
       int64_t Adjustment = 0LL;
       if (!Prev || !BC.MIB->isStackAdjustment(Inst) ||
           !BC.MIB->isStackAdjustment(*Prev) ||
