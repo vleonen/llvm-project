@@ -1300,6 +1300,12 @@ public:
   }
 
   bool isStackAdjustment(const MCInst &Inst) const override {
+    // PUSH/POP adjust the stack; recognized only in golang mode, where
+    // the Go pcsp tracking must see them (non-golang binaries keep the
+    // previous semantics of SUB/ADD/LEA-only).
+    if (GolangMode && (isPush(Inst) || isPop(Inst)))
+      return true;
+
     switch (Inst.getOpcode()) {
     default:
       return false;
