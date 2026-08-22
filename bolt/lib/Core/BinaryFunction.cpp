@@ -2869,7 +2869,6 @@ private:
     case MCCFIInstruction::OpLLVMDefAspaceCfa:
     case MCCFIInstruction::OpLabel:
     case MCCFIInstruction::OpValOffset:
-      llvm_unreachable("unsupported CFI opcode");
       break;
     case MCCFIInstruction::OpNegateRAState:
       if (!(opts::BinaryAnalysisMode || opts::HeatmapMode)) {
@@ -2881,7 +2880,6 @@ private:
     case MCCFIInstruction::OpRememberState:
     case MCCFIInstruction::OpRestoreState:
     case MCCFIInstruction::OpGnuArgsSize:
-      // do not affect CFI state
       break;
     }
   }
@@ -3015,8 +3013,7 @@ struct CFISnapshotDiff : public CFISnapshot {
     case MCCFIInstruction::OpLLVMDefAspaceCfa:
     case MCCFIInstruction::OpLabel:
     case MCCFIInstruction::OpValOffset:
-      llvm_unreachable("unsupported CFI opcode");
-      return false;
+      return true;
     case MCCFIInstruction::OpNegateRAState:
       if (!(opts::BinaryAnalysisMode || opts::HeatmapMode)) {
         llvm_unreachable("BOLT-ERROR: binaries using pac-ret hardening (e.g. "
@@ -3027,7 +3024,6 @@ struct CFISnapshotDiff : public CFISnapshot {
     case MCCFIInstruction::OpRememberState:
     case MCCFIInstruction::OpRestoreState:
     case MCCFIInstruction::OpGnuArgsSize:
-      // do not affect CFI state
       return true;
     }
     return false;
@@ -3172,7 +3168,6 @@ BinaryFunction::unwindCFIState(int32_t FromState, int32_t ToState,
     case MCCFIInstruction::OpLLVMDefAspaceCfa:
     case MCCFIInstruction::OpLabel:
     case MCCFIInstruction::OpValOffset:
-      llvm_unreachable("unsupported CFI opcode");
       break;
     case MCCFIInstruction::OpNegateRAState:
       if (!(opts::BinaryAnalysisMode || opts::HeatmapMode)) {
@@ -3182,7 +3177,6 @@ BinaryFunction::unwindCFIState(int32_t FromState, int32_t ToState,
       }
       break;
     case MCCFIInstruction::OpGnuArgsSize:
-      // do not affect CFI state
       break;
     }
   };
