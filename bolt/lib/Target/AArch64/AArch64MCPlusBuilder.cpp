@@ -876,6 +876,14 @@ public:
   ///    br      x17
   ///    nop
   ///
+  ///  The Go linker emits a 3-instruction variant with the same shape (no
+  ///  ADD, no NOP padding) that loads the GOT entry into x16 and branches
+  ///  through it:
+  ///
+  ///    adrp    x16, 230000
+  ///    ldr     x16, [x16, #3040]
+  ///    br      x16
+  ///
   uint64_t analyzePLTEntry(MCInst &Instruction, InstructionIterator Begin,
                            InstructionIterator End,
                            uint64_t BeginPC) const override {
@@ -931,22 +939,28 @@ public:
   }
 
   bool handlePLTEntry(InstructionIterator Begin, InstructionIterator End,
-                      const MCSymbol *PLTSymbol,
-                      MCContext *Ctx) override {
+                      const MCSymbol *PLTSymbol, MCContext *Ctx) override {
     int64_t Val;
-    int Count = 0;
+    bool SawAdrp = false;
+    bool SawLoad = false;
     for (auto I = Begin; I != End; ++I) {
-      if (isADRP(*I))
-        Count += replaceImmWithSymbolRef(*I, PLTSymbol, 0, Ctx, Val,
-                                         ELF::R_AARCH64_ADR_PREL_PG_HI21);
-      else if (isADD(*I))
-        Count += replaceImmWithSymbolRef(*I, PLTSymbol, 0, Ctx, Val,
-                                         ELF::R_AARCH64_ADD_ABS_LO12_NC);
-      else if (mayLoad(*I))
-        Count += replaceImmWithSymbolRef(*I, PLTSymbol, 0, Ctx, Val,
-                                         ELF::R_AARCH64_LDST64_ABS_LO12_NC);
+      if (isADRP(*I)) {
+        SawAdrp |= replaceImmWithSymbolRef(*I, PLTSymbol, 0, Ctx, Val,
+                                           ELF::R_AARCH64_ADR_PREL_PG_HI21);
+      } else if (isADD(*I)) {
+        replaceImmWithSymbolRef(*I, PLTSymbol, 0, Ctx, Val,
+                                ELF::R_AARCH64_ADD_ABS_LO12_NC);
+      } else if (mayLoad(*I)) {
+        SawLoad |= replaceImmWithSymbolRef(*I, PLTSymbol, 0, Ctx, Val,
+                                           ELF::R_AARCH64_LDST64_ABS_LO12_NC);
+      }
     }
-    return Count == 3;
+    // The ADD instruction is only used by lazy .plt entries to pass the GOT
+    // entry address to the resolver in x16 and is optional otherwise (e.g.
+    // 3-instruction entries emitted by the Go linker and non-lazy .plt.got
+    // entries). Require an address computation (ADRP) and a GOT load, which
+    // is the minimum needed to retarget the entry at the new GOT location.
+    return SawAdrp && SawLoad;
   }
 
   unsigned getInvertedBranchOpcode(unsigned Opcode) const {
