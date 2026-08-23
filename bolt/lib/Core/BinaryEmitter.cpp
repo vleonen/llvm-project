@@ -318,6 +318,10 @@ void BinaryEmitter::emitFunctions() {
       // cross-section BL references (e.g. bl __libc_start_main@plt).
       Streamer.emitLabel(BF->getSymbol());
       for (auto &BB : *BF) {
+        // Define basic block labels so consumers that iterate the layout
+        // (e.g. updateOutputValues with -update-debug-sections) see defined
+        // symbols, mirroring the regular function emission path.
+        Streamer.emitLabel(BB.getLabel());
         for (MCInst &Inst : BB)
           Streamer.emitInstruction(Inst, *BC.STI);
       }

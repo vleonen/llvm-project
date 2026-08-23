@@ -4238,6 +4238,12 @@ void BinaryFunction::updateOutputValues(const BOLTLinker &Linker) {
 
     BinaryBasicBlock *PrevBB = nullptr;
     for (BinaryBasicBlock *const BB : FF) {
+      // In rewrite mode, PLT functions are emitted as raw instructions and
+      // their basic block labels may not be defined. Skip such blocks; the
+      // check below stays live for all other functions to catch emission
+      // bugs.
+      if (opts::Rewrite && isPLTFunction() && !BB->getLabel()->isDefined())
+        continue;
       assert(BB->getLabel()->isDefined() && "symbol should be defined");
       if (!BC.HasRelocations) {
         if (BB->isSplit())
@@ -4267,9 +4273,12 @@ void BinaryFunction::updateOutputValues(const BOLTLinker &Linker) {
       PrevBB = BB;
     }
 
-    PrevBB->setOutputEndAddress(PrevBB->isSplit()
-                                    ? FF.getAddress() + FF.getImageSize()
-                                    : getOutputAddress() + getOutputSize());
+    // PrevBB stays null if every block of the fragment was skipped (e.g. a
+    // rewrite-mode PLT function with a single undefined-label block).
+    if (PrevBB)
+      PrevBB->setOutputEndAddress(PrevBB->isSplit()
+                                      ? FF.getAddress() + FF.getImageSize()
+                                      : getOutputAddress() + getOutputSize());
   }
 
   // Reset output addresses for deleted blocks.
