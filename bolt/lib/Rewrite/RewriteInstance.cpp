@@ -5921,8 +5921,14 @@ void RewriteInstance::patchELFGOT(ELFObjectFile<ELFT> *File) {
          Entry <
          reinterpret_cast<const uint64_t *>(Contents.data() + Contents.size());
          ++Entry) {
-      uint64_t NewAddress = UseDataAddr ? getNewFunctionOrDataAddress(*Entry)
-                                        : getNewFunctionAddress(*Entry);
+      // In rewrite mode, .got entries may reference data (e.g. pointers to
+      // variables in statically linked binaries with no dynamic relocs).
+      // getNewFunctionAddress would return 0 for those, leaving stale input
+      // addresses in the output. Use getNewFunctionOrDataAddress whose
+      // rewrite-mode section-delta fallback can map any allocatable address.
+      const uint64_t NewAddress = (UseDataAddr || opts::Rewrite)
+                                      ? getNewFunctionOrDataAddress(*Entry)
+                                      : getNewFunctionAddress(*Entry);
       if (!NewAddress || NewAddress == *Entry)
         continue;
       LLVM_DEBUG(dbgs() << "BOLT-DEBUG: patching " << SectionName << " entry 0x"
@@ -5946,7 +5952,12 @@ void RewriteInstance::patchELFGOT(ELFObjectFile<ELFT> *File) {
     }
   };
 
-  patchSection(".got", /*UseDataAddr=*/false);
+  // In rewrite mode .got entries are resolved through
+  // getNewFunctionOrDataAddress even when they reference functions, so that
+  // data pointers (no dynamic relocations, statically resolved by the
+  // linker) are mapped via the section-delta fallback instead of being
+  // skipped and left with stale input addresses.
+  patchSection(".got", /*UseDataAddr=*/opts::Rewrite);
   if (!BC->IsStaticExecutable)
     patchSection(".got.plt", /*UseDataAddr=*/true);
 }
