@@ -629,6 +629,25 @@ public:
     llvm_unreachable("not implemented");
   }
 
+  /// Return true if Adr/Stp/Sub/Call match the instruction sequence the Go
+  /// compiler emits on AArch64 in place of a DUFFZERO/DUFFCOPY
+  /// pseudo-instruction:
+  ///
+  ///   adr  x27, ret_addr
+  ///   stp  x29, x27, [sp, #-0x18]
+  ///   sub  x29, sp, #0x18
+  ///   bl   runtime.duffzero/N or runtime.duffcopy/N
+  ///
+  /// The idiom materializes the return address of the duff call into x27
+  /// and stores it on the stack as a part of a synthetic frame. Adr must
+  /// be an ADR instruction writing to the same register as the second
+  /// register stored by Stp, and Call must be a call instruction.
+  virtual bool isGolangDuffSequence(const MCInst &Adr, const MCInst &Stp,
+                                    const MCInst &Sub,
+                                    const MCInst &Call) const {
+    return false;
+  }
+
   virtual bool isMoveMem2Reg(const MCInst &Inst) const { return false; }
 
   virtual bool mayLoad(const MCInst &Inst) const {

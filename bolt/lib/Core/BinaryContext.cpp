@@ -436,6 +436,7 @@ BinaryContext::handleAddressRef(uint64_t Address, BinaryFunction &BF,
                  << Twine::utohexstr(Address) << " in function " << BF << '\n';
         }
         BF.HasInternalLabelReference = true;
+        BF.registerInternalLabelReference(Address - BF.getAddress());
         return std::make_pair(
             BF.addEntryPointAtOffset(Address - BF.getAddress()), 0);
       }
@@ -2283,6 +2284,26 @@ void BinaryContext::markAmbiguousRelocations(BinaryData &BD,
     BinaryData *Next = getBinaryDataContainingAddress(BD.getEndAddress());
     if (Next && Next->getAddress() == BD.getEndAddress())
       setImmovable(*Next);
+  }
+}
+
+void BinaryContext::resolveGolangDuffFunctions() {
+  if (!isAArch64() || opts::GolangPass == opts::GV_NONE)
+    return;
+
+  // The runtime functions may be registered under auxiliary names, e.g.
+  // local.runtime.duffzero or with a hash suffix, hence use substring
+  // matching against all names of every function (the same way
+  // DefaultSkipGolangFuncs are matched).
+  for (auto &BFI : BinaryFunctions) {
+    for (StringRef Name : BFI.second.getNames()) {
+      if (!GolangDuffzeroBF && Name.contains("runtime.duffzero"))
+        GolangDuffzeroBF = &BFI.second;
+      if (!GolangDuffcopyBF && Name.contains("runtime.duffcopy"))
+        GolangDuffcopyBF = &BFI.second;
+    }
+    if (GolangDuffzeroBF && GolangDuffcopyBF)
+      break;
   }
 }
 

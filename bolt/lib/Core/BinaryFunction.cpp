@@ -1950,6 +1950,79 @@ bool BinaryFunction::validateExternallyReferencedOffsets() {
   return !HasUnclaimedReference;
 }
 
+/// Return true if all internal label references in \p BF (the ones that set
+/// HasInternalLabelReference) originate from the Go compiler
+/// DUFFZERO/DUFFCOPY idiom on AArch64. The Go assembler expands a
+/// DUFFZERO/DUFFCOPY pseudo-instruction into the following sequence
+/// (cmd/internal/obj/arm64/obj7.go):
+///
+///   adr  x27, ret_addr
+///   stp  x29, x27, [sp, #-0x18]
+///   sub  x29, sp, #0x18
+///   bl   runtime.duffzero/N or runtime.duffcopy/N
+/// ret_addr:
+///   sub  x29, sp, #0x8
+///
+/// The idiom materializes the address of the intra-function label ret_addr
+/// into x27 and stores it on the stack together with the frame pointer,
+/// creating a synthetic stack frame so that the Go runtime stack unwinder can
+/// trace through the duff call. The address is never used as a branch target
+/// by the program itself. Since ret_addr is registered as a secondary entry
+/// point of the function, it is safely relocated together with the function
+/// and it is fine to keep processing and optimizing the function in
+/// relocation mode.
+static bool isGolangDuffInternalRefs(BinaryFunction &BF) {
+  BinaryContext &BC = BF.getBinaryContext();
+
+  // Every internal label reference must be verified as a ret_addr label of
+  // the idiom.
+  std::set<uint64_t> UnverifiedRefs = BF.getInternalLabelReferenceOffsets();
+  if (UnverifiedRefs.empty())
+    return false;
+
+  // The ret_addr label starts a basic block registered as a secondary entry
+  // point. Check the basic block that falls through into it.
+  BinaryBasicBlock *PrevBB = nullptr;
+  for (BinaryBasicBlock &RetBB : BF) {
+    BinaryBasicBlock *const CurBB = &RetBB;
+    const uint64_t RetOffset = RetBB.getOffset();
+    if (UnverifiedRefs.count(RetOffset)) {
+      const MCSymbol *EntrySymbol = BF.getSecondaryEntryPointSymbol(RetBB);
+      if (!EntrySymbol || !PrevBB || PrevBB->succ_size() != 1 ||
+          *PrevBB->succ_begin() != CurBB || PrevBB->size() < 4)
+        return false;
+
+      // The idiom must end the previous basic block:
+      // [.. adr x27, ret_addr; stp; sub; bl runtime.duff*]
+      auto CallIt = std::prev(PrevBB->end());
+      auto SubIt = std::prev(CallIt);
+      auto StpIt = std::prev(SubIt);
+      auto AdrIt = std::prev(StpIt);
+
+      if (!BC.MIB->isGolangDuffSequence(*AdrIt, *StpIt, *SubIt, *CallIt))
+        return false;
+
+      // The ADR must reference the secondary entry point of RetBB.
+      if (BC.MIB->getTargetAddend(*AdrIt) != 0 ||
+          BC.MIB->getTargetSymbol(*AdrIt) != EntrySymbol)
+        return false;
+
+      // The call must enter runtime.duffzero/runtime.duffcopy, resolved by
+      // identity before disassembly.
+      const MCSymbol *CalleeSymbol = BC.MIB->getTargetSymbol(*CallIt);
+      BinaryFunction *Callee =
+          CalleeSymbol ? BC.getFunctionForSymbol(CalleeSymbol) : nullptr;
+      if (!BC.isGolangDuffFunction(Callee))
+        return false;
+
+      UnverifiedRefs.erase(RetOffset);
+    }
+    PrevBB = CurBB;
+  }
+
+  return UnverifiedRefs.empty();
+}
+
 bool BinaryFunction::postProcessIndirectBranches(
     MCPlusBuilder::AllocatorIdTy AllocId) {
   auto addUnknownControlFlow = [&](BinaryBasicBlock &BB) {
@@ -2056,8 +2129,19 @@ bool BinaryFunction::postProcessIndirectBranches(
     }
   }
 
-  if (HasInternalLabelReference)
-    return false;
+  if (HasInternalLabelReference) {
+    // The Go compiler emits an ADR instruction that takes the address of an
+    // intra-function label as a part of the DUFFZERO/DUFFCOPY idiom. If all
+    // internal label references in this function originate from this idiom,
+    // it is safe to keep processing the function in relocation mode: the
+    // label is registered as a secondary entry point and is properly
+    // relocated together with the function.
+    if (BC.isAArch64() && BC.HasRelocations &&
+        opts::GolangPass != opts::GV_NONE && isGolangDuffInternalRefs(*this))
+      HasInternalLabelReference = false;
+    else
+      return false;
+  }
 
   // If there's only one jump table, and one indirect jump, and no other
   // references, then we should be able to derive the jump table even if we

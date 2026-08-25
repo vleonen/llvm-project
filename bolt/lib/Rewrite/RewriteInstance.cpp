@@ -3489,6 +3489,11 @@ void RewriteInstance::disassembleFunctions() {
   NamedRegionTimer T("disassembleFunctions", "disassemble functions",
                      TimerGroupName, TimerGroupDesc, opts::TimeRewrite);
 
+  // Resolve the golang duff functions while we are single-threaded, before
+  // buildFunctionsCFG() uses them from parallel workers to recognize the
+  // Go DUFFZERO/DUFFCOPY idiom.
+  BC->resolveGolangDuffFunctions();
+
   // Create annotation indices to allow lock-free execution
   BC->MIB->getOrCreateAnnotationIndex("Size");
   BC->MIB->getOrCreateAnnotationIndex("Locked");
