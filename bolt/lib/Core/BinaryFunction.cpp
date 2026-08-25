@@ -1378,6 +1378,78 @@ Error BinaryFunction::disassemble() {
       uint64_t TargetAddress = 0;
       if (MIB->evaluateBranch(Instruction, AbsoluteInstrAddr, Size,
                               TargetAddress)) {
+        // Out-of-line loads on AArch64: a toolchain may replace a MOVD
+        // reg-offset load with an unconditional branch to a small thunk
+        // that performs the load using the base register set up by the
+        // preceding ADRP and jumps back (e.g. the Go compiler built with
+        // -mappingsymbol does this).  The input relocation
+        // (R_AARCH64_LDST*_ABS_LO12_NC) stays at the branch site and
+        // describes the thunk's load.  BOLT drops relocations on branch
+        // instructions, so the thunk would be re-emitted with a load offset
+        // that is only valid for the original data-section page layout and
+        // becomes stale when -rewrite moves data sections.  Inline the
+        // thunk's load in place of the branch so that the relocation is
+        // attached to the load and re-emission recomputes the offset, the
+        // same way as for regular in-line loads.
+        //
+        // Only the exact thunk shape is inlined: the branch must be
+        // unconditional and leave this function, the relocation must be an
+        // LDST ABS_LO12 one, and the 8-byte thunk must decode as
+        // [load, unconditional branch back to the next instruction].
+        if (opts::Rewrite && BC.isAArch64() &&
+            MIB->isUnconditionalBranch(Instruction) &&
+            !containsAddress(TargetAddress)) {
+          auto RItr = Relocations.find(Offset);
+          if (RItr != Relocations.end() &&
+              (RItr->second.Type == ELF::R_AARCH64_LDST64_ABS_LO12_NC ||
+               RItr->second.Type == ELF::R_AARCH64_LDST32_ABS_LO12_NC ||
+               RItr->second.Type == ELF::R_AARCH64_LDST128_ABS_LO12_NC)) {
+            ErrorOr<BinarySection &> ThunkSection =
+                BC.getSectionForAddress(TargetAddress);
+            if (ThunkSection) {
+              StringRef SectionContents = ThunkSection->getContents();
+              const uint8_t *SectionData =
+                  reinterpret_cast<const uint8_t *>(SectionContents.data());
+              const uint64_t ThunkOffset =
+                  TargetAddress - ThunkSection->getAddress();
+              MCInst LoadInst;
+              MCInst BackBranchInst;
+              uint64_t LoadSize = 0;
+              uint64_t BackBranchSize = 0;
+              uint64_t BackBranchTarget = 0;
+              if (ThunkOffset + 8 <= SectionContents.size() &&
+                  BC.SymbolicDisAsm->getInstruction(
+                      LoadInst, LoadSize,
+                      ArrayRef<uint8_t>(SectionData + ThunkOffset, 4),
+                      TargetAddress, nulls()) &&
+                  LoadSize == 4 && !MIB->isBranch(LoadInst) &&
+                  !MIB->isCall(LoadInst) &&
+                  BC.SymbolicDisAsm->getInstruction(
+                      BackBranchInst, BackBranchSize,
+                      ArrayRef<uint8_t>(SectionData + ThunkOffset + 4, 4),
+                      TargetAddress + 4, nulls()) &&
+                  BackBranchSize == 4 &&
+                  MIB->isUnconditionalBranch(BackBranchInst) &&
+                  MIB->evaluateBranch(BackBranchInst, TargetAddress + 4,
+                                      BackBranchSize, BackBranchTarget) &&
+                  BackBranchTarget == AbsoluteInstrAddr + Size) {
+                int64_t Value = RItr->second.Value;
+                if (BC.MIB->replaceImmWithSymbolRef(
+                        LoadInst, RItr->second.Symbol, RItr->second.Addend,
+                        Ctx.get(), Value, RItr->second.Type)) {
+                  Instruction = LoadInst;
+                  goto add_instruction;
+                }
+                // The immediate could not be replaced with the relocation's
+                // symbol reference: keep the branch as-is (the thunk stays
+                // out-of-line) rather than emitting an unrelocated load.
+                LLVM_DEBUG(dbgs() << "BOLT-DEBUG: failed to retarget the "
+                                     "out-of-line load thunk at 0x"
+                                  << Twine::utohexstr(TargetAddress) << '\n');
+              }
+            }
+          }
+        }
         // Check if the target is within the same function. Otherwise it's
         // a call, possibly a tail call.
         //
