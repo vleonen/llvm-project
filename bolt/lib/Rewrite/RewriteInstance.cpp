@@ -7022,31 +7022,6 @@ void RewriteInstance::rewriteFile() {
     }
   }
 
-  // In rewrite mode, re-seek to end of all section data so that pwrite
-  // assertions (Size + Offset <= Pos) pass for flushPendingRelocations.
-  if (opts::Rewrite) {
-    uint64_t EndOff = 0;
-    for (BinarySection &Section : BC->allocatableSections()) {
-      if (Section.isFinalized() && Section.getOutputFileOffset() &&
-          !Section.isLinkOnly())
-        EndOff = std::max(EndOff, Section.getOutputFileOffset() +
-                                      Section.getOutputSize());
-    }
-    OS.seek(EndOff);
-  }
-
-  for (BinarySection &Section : BC->allocatableSections()) {
-    // In rewrite mode, skip pending relocations for allocatable sections.
-    // The dynamic linker applies RELATIVE/GLOB_DAT relocations from .rela.dyn,
-    // which BOLT has already updated with correct new addresses. Applying
-    // pending relocations here would corrupt non-relocated data fields.
-    if (opts::Rewrite)
-      continue;
-    Section.flushPendingRelocations(OS, [this](const MCSymbol *S) {
-      return getNewValueForSymbol(S->getName());
-    });
-  }
-
   // If .eh_frame is present create .eh_frame_hdr.
   if (EHFrameSection)
     writeEHFrameHeader();
@@ -7244,6 +7219,42 @@ void RewriteInstance::rewriteFile() {
         }
       }
     }
+  }
+
+  // In rewrite mode, re-seek to end of all section data so that pwrite
+  // assertions (Size + Offset <= Pos) pass for flushPendingRelocations.
+  if (opts::Rewrite) {
+    uint64_t EndOff = 0;
+    for (BinarySection &Section : BC->allocatableSections()) {
+      if (Section.isFinalized() && Section.getOutputFileOffset() &&
+          !Section.isLinkOnly())
+        EndOff = std::max(EndOff, Section.getOutputFileOffset() +
+                                      Section.getOutputSize());
+    }
+    OS.seek(EndOff);
+  }
+
+  // Flush pending relocations: post-emit metadata patches (e.g. Golang
+  // funcdata in pre-existing data sections) and other pending patches.
+  // Must run after the "restore original data" loop in -rewrite mode so
+  // that the patches are the last values written.  In -rewrite mode skip
+  // text sections: they are fully re-emitted and pending relocation
+  // offsets against their input contents are stale.
+  for (BinarySection &Section : BC->allocatableSections()) {
+    if (opts::Rewrite && Section.isText())
+      continue;
+    Section.flushPendingRelocations(
+        OS,
+        [this](const MCSymbol *S) {
+          return getNewValueForSymbol(S->getName());
+        },
+        [&](const Relocation &R) {
+          // In rewrite mode, skip offsets covered by dynamic relocations:
+          // BOLT has already updated their addends and the dynamic linker
+          // re-applies them at load time (same rule as the saved data
+          // relocations block above).
+          return opts::Rewrite && Section.getDynamicRelocationAt(R.Offset);
+        });
   }
 
   if (opts::PrintSections) {
