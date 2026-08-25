@@ -189,6 +189,17 @@ report the number of functions with a stale profile. The higher the
 number, the less performance improvement should be expected. Thus, it is
 crucial to update `.fdata` for release branches.
 
+### Rewrite Mode (Experimental)
+
+As an alternative processing mode, BOLT can be run with the `-rewrite` flag,
+which relocates all sections of the input binary in-place instead of laying
+out a completely new binary. The mode relies on the relocations emitted by
+the linker (see Step 0) to patch references to moved code and data, and can
+preserve the original section order with the `-keep-section-order` flag.
+Note that `-rewrite` is intended for optimization runs only — it is
+incompatible with `-instrument`, and BOLT will report an error if both are
+used together.
+
 ## Multiple Profiles
 
 Suppose your application can run in different modes, and you can generate
