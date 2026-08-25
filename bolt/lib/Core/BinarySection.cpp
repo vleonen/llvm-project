@@ -196,7 +196,8 @@ void BinarySection::emitAsData(
 }
 
 void BinarySection::flushPendingRelocations(raw_pwrite_stream &OS,
-                                            SymbolResolverFuncTy Resolver) {
+                                            SymbolResolverFuncTy Resolver,
+                                            SkipRelocationFuncTy SkipReloc) {
   if (PendingRelocations.empty() && Patches.empty())
     return;
 
@@ -220,6 +221,8 @@ void BinarySection::flushPendingRelocations(raw_pwrite_stream &OS,
               SectionFileOffset + Patch.Offset);
 
   for (Relocation &Reloc : PendingRelocations) {
+    if (SkipReloc && SkipReloc(Reloc))
+      continue;
     uint64_t Value = Reloc.Addend;
     if (Reloc.Symbol)
       Value += Resolver(Reloc.Symbol);

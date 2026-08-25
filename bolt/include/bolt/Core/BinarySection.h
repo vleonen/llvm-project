@@ -483,11 +483,15 @@ public:
                   ArrayRef<std::pair<uint64_t, MCSymbol *>> Labels = {}) const;
 
   using SymbolResolverFuncTy = llvm::function_ref<uint64_t(const MCSymbol *)>;
+  using SkipRelocationFuncTy = llvm::function_ref<bool(const Relocation &)>;
 
   /// Flush all pending relocations to patch original contents of sections
-  /// that were not emitted via MCStreamer.
+  /// that were not emitted via MCStreamer.  \p SkipReloc, when provided,
+  /// allows the caller to skip individual pending relocations (e.g. offsets
+  /// covered by dynamic relocations in -rewrite mode).
   void flushPendingRelocations(raw_pwrite_stream &OS,
-                               SymbolResolverFuncTy Resolver);
+                               SymbolResolverFuncTy Resolver,
+                               SkipRelocationFuncTy SkipReloc = nullptr);
 
   /// Change contents of the section.
   void updateContents(const uint8_t *Data, size_t NewSize) {
