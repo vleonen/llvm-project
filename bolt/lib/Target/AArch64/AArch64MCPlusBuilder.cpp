@@ -599,6 +599,29 @@ public:
     return materializeAddress(Target, Ctx, Reg, Addend);
   }
 
+  bool isGolangDuffSequence(const MCInst &Adr, const MCInst &Stp,
+                            const MCInst &Sub,
+                            const MCInst &Call) const override {
+    if (!isADR(Adr) || !isCall(Call))
+      return false;
+    MCPhysReg Reg;
+    getADRReg(Adr, Reg);
+    // adr  Reg, ret_addr
+    // stp  x29, Reg, [sp, #-0x18]
+    // sub  x29, sp, #0x18
+    // bl   runtime.duffzero/N or runtime.duffcopy/N
+    return Reg == AArch64::X27 && Stp.getOpcode() == AArch64::STPXi &&
+           Stp.getOperand(0).getReg() == AArch64::FP &&
+           Stp.getOperand(1).getReg() == AArch64::X27 &&
+           Stp.getOperand(2).getReg() == AArch64::SP &&
+           Stp.getOperand(3).getImm() == -0x18 / 8 &&
+           Sub.getOpcode() == AArch64::SUBXri &&
+           Sub.getOperand(0).getReg() == AArch64::FP &&
+           Sub.getOperand(1).getReg() == AArch64::SP &&
+           Sub.getOperand(2).getImm() == 0x18 &&
+           Sub.getOperand(3).getImm() == 0;
+  }
+
   bool isTB(const MCInst &Inst) const {
     return (Inst.getOpcode() == AArch64::TBNZW ||
             Inst.getOpcode() == AArch64::TBNZX ||

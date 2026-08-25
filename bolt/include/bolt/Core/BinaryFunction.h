@@ -51,6 +51,7 @@
 #include <algorithm>
 #include <iterator>
 #include <limits>
+#include <set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -316,6 +317,12 @@ private:
   /// from the same function as a data, i.e. it's possible the label is used
   /// inside an address calculation or could be referenced from outside.
   bool HasInternalLabelReference{false};
+
+  /// Offsets (relative to the function start) of all code locations whose
+  /// address was taken internally and which caused
+  /// HasInternalLabelReference to be set. Used to verify that every such
+  /// reference originates from the Go DUFFZERO/DUFFCOPY idiom.
+  std::set<uint64_t> InternalLabelReferenceOffsets;
 
   /// In AArch64, preserve nops to maintain code equal to input (assuming no
   /// optimizations are done).
@@ -772,6 +779,19 @@ private:
 
 public:
   BinaryFunction(BinaryFunction &&) = default;
+
+  /// Offsets (relative to the function start) of all code locations whose
+  /// address was taken internally and which caused
+  /// HasInternalLabelReference to be set. Used to verify that every such
+  /// reference originates from the Go DUFFZERO/DUFFCOPY idiom.
+  const std::set<uint64_t> &getInternalLabelReferenceOffsets() const {
+    return InternalLabelReferenceOffsets;
+  }
+
+  /// Register an internal address reference at function-relative Offset.
+  void registerInternalLabelReference(uint64_t Offset) {
+    InternalLabelReferenceOffsets.insert(Offset);
+  }
 
   using iterator = pointee_iterator<BasicBlockListType::iterator>;
   using const_iterator = pointee_iterator<BasicBlockListType::const_iterator>;

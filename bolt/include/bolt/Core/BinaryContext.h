@@ -291,6 +291,13 @@ class BinaryContext {
   /// Functions injected by BOLT
   std::vector<BinaryFunction *> InjectedBinaryFunctions;
 
+  /// Functions backing runtime.duffzero and runtime.duffcopy, resolved
+  /// once by resolveGolangDuffFunctions() before parallel processing
+  /// starts. Used to recognize the Go DUFFZERO/DUFFCOPY idiom by function
+  /// identity instead of by symbol name matching.
+  BinaryFunction *GolangDuffzeroBF{nullptr};
+  BinaryFunction *GolangDuffcopyBF{nullptr};
+
   /// Jump tables for all functions mapped by address.
   std::map<uint64_t, JumpTable *> JumpTables;
 
@@ -641,6 +648,20 @@ public:
 
   const BinaryFunction *getBinaryFunctionByName(StringRef Name) const {
     return const_cast<BinaryContext *>(this)->getBinaryFunctionByName(Name);
+  }
+
+  /// Resolve the BinaryFunctions backing runtime.duffzero and
+  /// runtime.duffcopy. Must be called once, after all functions are
+  /// registered and before any multi-threaded processing starts (e.g. at
+  /// the beginning of disassembly). A no-op for non-golang/non-AArch64
+  /// inputs and when the functions cannot be found.
+  void resolveGolangDuffFunctions();
+
+  /// Return true if \p BF is one of the functions backing
+  /// runtime.duffzero/runtime.duffcopy, previously resolved by
+  /// resolveGolangDuffFunctions().
+  bool isGolangDuffFunction(const BinaryFunction *BF) const {
+    return BF && (BF == GolangDuffzeroBF || BF == GolangDuffcopyBF);
   }
 
   /// Return BinaryData for the given \p Name
