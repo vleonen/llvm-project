@@ -4058,6 +4058,17 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
   // Track sections that have been mapped to avoid double-mapping.
   DenseSet<BinarySection *> MappedSections;
 
+  // .tbss is excluded from allocatableSections() (see
+  // BinarySection::isAllocatable) because as a NOBITS section it occupies
+  // no file space and shares its vaddr range with the following
+  // file-backed sections. Collect TLS NOBITS sections separately so the
+  // layout below can assign them output addresses, which is required to
+  // rebuild PT_TLS and to keep thread-local variables mapped at runtime.
+  std::vector<BinarySection *> TbssSections;
+  for (BinarySection &Section : BC->sections())
+    if (Section.isTBSS())
+      TbssSections.push_back(&Section);
+
   // Helper: check if a section name is PLT-related. Strips BOLT section
   // prefixes (.bolt.org. / .bolt.new.) applied by updateSection() so
   // that renamed PLT sections are still recognized.
@@ -4255,6 +4266,39 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
 
       NextAvailableAddress += Size;
       NextAvailableOffset += Size;
+
+      // Place TLS NOBITS (.tbss) sections that follow this file-backed TLS
+      // section (e.g. .tdata) in the input address space, preserving their
+      // offset relative to the start of the TLS template.
+      // Thread-pointer-relative relocations were resolved at link time and
+      // require the intra-template layout to stay unchanged. No file space
+      // is consumed.
+      if (Section->isTLS()) {
+        for (BinarySection *Tbss : TbssSections) {
+          if (Tbss->getOutputAddress())
+            continue;
+          if (Tbss->getAddress() < Section->getAddress())
+            continue;
+          const uint64_t TbssAddr =
+              Section->getOutputAddress() +
+              (Tbss->getAddress() - Section->getAddress());
+          Tbss->setOutputAddress(TbssAddr);
+          Tbss->setOutputFileOffset(NextAvailableOffset);
+          BC->OutputAddressToOffsetMap[TbssAddr] = NextAvailableOffset;
+          NextAvailableAddress =
+              std::max(NextAvailableAddress, TbssAddr + Tbss->getSize());
+          // Keep file offsets in phase with addresses: file-backed sections
+          // mapped after the NOBITS .tbss must satisfy
+          // addr - SegmentStartAddress == offset - SegmentStartOffset,
+          // otherwise segment descriptors built from both (e.g.
+          // PT_DYNAMIC) become self-inconsistent and the dynamic loader
+          // reads garbage. Advance the offset over a file hole.
+          const uint64_t Phase = SegmentStartAddress - SegmentStartOffset;
+          NextAvailableOffset =
+              std::max(NextAvailableOffset, NextAvailableAddress - Phase);
+          MappedSections.insert(Tbss);
+        }
+      }
     }
 
     // Map NOBITS sections at the end (memory only, no file space).
@@ -4274,6 +4318,23 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
 
       NextAvailableAddress += Size;
       // Don't advance NextAvailableOffset for NOBITS.
+    }
+
+    // Place TLS NOBITS sections that were not anchored to a file-backed
+    // TLS section (e.g. Go binaries that only have .tbss). Their absolute
+    // position does not matter - the TLS template is the section itself -
+    // but they must reside inside a mapped segment so that thread-local
+    // variables are accessible at runtime.
+    for (BinarySection *Tbss : TbssSections) {
+      if (Tbss->getOutputAddress() || !Phdr.contains(*Tbss))
+        continue;
+      NextAvailableAddress =
+          alignTo(NextAvailableAddress, Tbss->getAlignment());
+      Tbss->setOutputAddress(NextAvailableAddress);
+      Tbss->setOutputFileOffset(NextAvailableOffset);
+      BC->OutputAddressToOffsetMap[NextAvailableAddress] = NextAvailableOffset;
+      NextAvailableAddress += Tbss->getSize();
+      MappedSections.insert(Tbss);
     }
 
     // Compute segment sizes from the actual range (includes ELF header +
@@ -4365,6 +4426,49 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
       // PT_GNU_STACK has no sections, just copy flags.
       BC->OutputSegments.emplace_back(Phdr.p_type, Phdr.p_flags, 0, 0, 0, 0, 0,
                                       Phdr.p_align);
+      continue;
+    }
+
+    if (Phdr.isTLS()) {
+      // Rebuild PT_TLS from the output locations of the TLS sections
+      // (.tdata file-backed + .tbss NOBITS). The TLS template overlaps the
+      // vaddr range of following non-TLS sections (NOBITS .tbss shares its
+      // vaddr with e.g. .init_array), so the generic first-match
+      // containment logic below would derive the descriptor from a wrong
+      // section. p_filesz must only cover the file-backed part of the
+      // template (.tdata), while p_memsz covers the full span including
+      // .tbss.
+      BinarySection *Tdata = nullptr;
+      uint64_t VAddr = std::numeric_limits<uint64_t>::max();
+      uint64_t VAddrEnd = 0;
+      uint64_t FileEnd = 0;
+      for (BinarySection &Section : BC->sections()) {
+        if (!Section.isTLS() || !Section.getOutputAddress())
+          continue;
+        const uint64_t Size =
+            Section.isVirtual() ? Section.getSize() : Section.getOutputSize();
+        if (Section.getOutputAddress() < VAddr) {
+          VAddr = Section.getOutputAddress();
+          Tdata = &Section;
+        }
+        VAddrEnd = std::max(VAddrEnd, Section.getOutputAddress() + Size);
+        if (!Section.isVirtual())
+          FileEnd = std::max(FileEnd, Section.getOutputAddress() + Size);
+      }
+
+      if (VAddrEnd) {
+        BC->OutputSegments.emplace_back(ELF::PT_TLS, Phdr.p_flags,
+                                        Tdata->getOutputFileOffset(), VAddr,
+                                        VAddr, FileEnd ? FileEnd - VAddr : 0,
+                                        VAddrEnd - VAddr, Phdr.p_align);
+        continue;
+      }
+
+      errs() << "BOLT-WARNING: no TLS sections were placed; keeping the "
+                "input PT_TLS descriptor\n";
+      BC->OutputSegments.emplace_back(Phdr.p_type, Phdr.p_flags, Phdr.p_offset,
+                                      Phdr.p_vaddr, Phdr.p_paddr, Phdr.p_filesz,
+                                      Phdr.p_memsz, Phdr.p_align);
       continue;
     }
 
