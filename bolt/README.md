@@ -212,6 +212,50 @@ $ merge-fdata *.fdata > combined.fdata
 Use `combined.fdata` for **Step 3** above to generate a universally optimized
 binary.
 
+## Golang Support
+
+BOLT can optimize binaries produced by the Go compiler (gc). Enable the
+support with the `-golang` option, passing either the exact Go version
+(`1.20`, `1.22` or `1.24`) or `1` to auto-detect it from the binary. Go 1.24
+is the recommended and best-tested toolchain. The binary should be linked
+with external linking that preserves relocations and does not compress
+debug sections. Both regular PIE binaries and binaries linked with
+`-no-pie` are supported in all modes, including `-rewrite`. Note that the
+`-gcflags=all=-d=go119usejumptables=0` option is required: it disables the
+generation of jump tables, which BOLT does not support in Go binaries.
+The `all=` prefix is important: a bare `-gcflags=` only applies to the
+packages listed on the command line, while jump tables in standard library
+packages (e.g. `reflect`, `runtime`) would leave dynamic relocations that
+BOLT cannot update:
+```
+go build -buildmode=pie -tags=bolt -gcflags=all=-d=go119usejumptables=0 \
+    -ldflags='-linkmode=external -extld=gcc -extldflags "-fuse-ld=bfd -Wl,--emit-relocs -Wl,--compress-debug-sections=none"' \
+    -buildvcs=false -o app.exe main.go
+```
+Add `-no-pie` to the `-extldflags` string (before `-Wl,--emit-relocs`) if
+a non-PIE binary is preferred.
+
+The `-tags=bolt` flag is required on x86-64 (it requires a Go toolchain
+that supports it); on other architectures it is a harmless no-op.
+
+On AArch64, add the `-mappingsymbol` flag to `go build` (requires a Go
+toolchain that supports it). When building single-file programs outside a
+module, set `GO111MODULE=off`.
+
+The profile can be collected with BOLT instrumentation (`-instrument`,
+incompatible with `-rewrite`) or with `perf` as usual. For optimization runs
+we recommend the following flag set:
+```
+llvm-bolt app.exe -o app.exe.bolt --golang=1.24 -data=perf.fdata \
+    -reorder-blocks=ext-tsp -reorder-functions=hfsort
+```
+
+Note that several BOLT optimizations are not supported on Go binaries and
+are automatically disabled when `-golang` is used: inlining, peephole
+optimizations, frame optimizations, hot text, hot functions at end, block
+alignment, and lite mode. Function alignment of at least 16 bytes is
+enforced.
+
 ## License
 
 BOLT is licensed under the [Apache License v2.0 with LLVM Exceptions](./LICENSE.TXT).
