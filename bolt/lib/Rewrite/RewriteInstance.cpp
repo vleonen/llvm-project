@@ -4039,6 +4039,12 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
         continue;
       if (Section.getOutputSize() == 0 && !Section.isVirtual())
         continue;
+      // Skip BOLT-internal renamed originals (e.g. the original .plt
+      // replaced by its re-emitted counterpart): their content is not
+      // written to the output, and placing them would reserve a phantom,
+      // possibly non-executable LOAD segment.
+      if (Section.getOutputName().starts_with(getOrgSecPrefix()))
+        continue;
       StraySections.push_back(&Section);
     }
 
@@ -4063,6 +4069,9 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
             NextAvailableOffset;
         if (Section->hasValidSectionID())
           MapSection(*Section, NextAvailableAddress);
+
+        if (Section->getELFFlags() & ELF::SHF_EXECINSTR)
+          SegmentFlags |= ELF::PF_X;
 
         if (Section->getELFFlags() & ELF::SHF_WRITE)
           SegmentFlags |= ELF::PF_W;
