@@ -1248,6 +1248,7 @@ void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
   // labels enable JITLink to resolve PLT→GOT cross-references.
   DenseMap<const BinarySection *, SmallVector<std::pair<uint64_t, MCSymbol *>>>
       SectionLabels;
+  DenseSet<const MCSymbol *> EmittedPLTSyms;
   if (opts::Rewrite) {
     int TotalPLT = 0, NonPseudoPLT = 0;
     for (auto &BFI : BC.getBinaryFunctions()) {
@@ -1260,6 +1261,11 @@ void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
       NonPseudoPLT++;
       const MCSymbol *PLTSym = BF.getPLTSymbol();
       if (!PLTSym || PLTSym->getName().empty())
+        continue;
+      // Several PLT functions may reference the same GOT slot (e.g. a
+      // .plt.sec entry and the corresponding lazy stub in .plt); emit the
+      // slot label only once.
+      if (!EmittedPLTSyms.insert(PLTSym).second)
         continue;
       // Look up the GOT entry address from BinaryData
       if (BinaryData *BD = BC.getBinaryDataByName(PLTSym->getName())) {

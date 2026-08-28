@@ -1530,11 +1530,15 @@ BinaryFunction *RewriteInstance::createPLTBinaryFunction(uint64_t TargetAddress,
     return nullptr;
   }
 
-  if (!BF)
-    BF = BC->createBinaryFunction(Symbol->getName().str() + "@PLT", *Section,
-                                  EntryAddress, 0, EntrySize,
+  if (!BF) {
+    std::string BFName = Symbol->getName().str() + "@PLT";
+    // Distinguish the .plt lazy stub from the .plt.sec entry of the same
+    // import: both reference the same GOT slot but are separate functions.
+    while (BC->getBinaryFunctionByName(BFName))
+      BFName += ".stub";
+    BF = BC->createBinaryFunction(BFName, *Section, EntryAddress, 0, EntrySize,
                                   Section->getAlignment());
-  else
+  } else
     BF->addAlternativeName(Symbol->getName().str() + "@PLT");
   setPLTSymbol(BF, Symbol->getName());
   return BF;
@@ -1696,9 +1700,40 @@ void RewriteInstance::disassemblePLTSectionX86(BinarySection &Section,
       if (opts::Rewrite) {
         BC->MIB->setSize(Instruction, InstrSize);
         Instructions.emplace_back(Instruction);
+        // The bytes after the direct "jmp PLT0" tail of a lazy stub are
+        // padding; collecting them would create an unreachable basic
+        // block and invalidate the CFG.
+        if (BC->MIB->isUnconditionalBranch(Instruction))
+          break;
       }
 
       InstrOffset += InstrSize;
+    }
+
+    // CET-style lazy stubs (endbr64; push $Idx; jmp PLT0) contain no
+    // indirect branch, so no GOT reference was evaluated above. Recover
+    // the GOT slot address from the pushed relocation index (the .got.plt
+    // layout is 3 reserved entries followed by one slot per .rela.plt
+    // entry) so the stub is registered and emitted for lazy binding.
+    if (!TargetAddress && opts::Rewrite && EntryOffset > 0 &&
+        !Instructions.empty()) {
+      std::optional<uint64_t> PushedIndex;
+      for (const MCInst &Inst : Instructions) {
+        if (BC->MIB->isPush(Inst) && Inst.getNumOperands() > 0 &&
+            Inst.getOperand(0).isImm()) {
+          PushedIndex = Inst.getOperand(0).getImm();
+          break;
+        }
+      }
+      if (PushedIndex) {
+        ErrorOr<BinarySection &> GotPlt =
+            BC->getUniqueSectionByName(".got.plt");
+        if (GotPlt) {
+          const uint64_t Slot = GotPlt->getAddress() + 3 * 8 + 8 * *PushedIndex;
+          if (BC->getDynamicRelocationAt(Slot))
+            TargetAddress = Slot;
+        }
+      }
     }
 
     if (!TargetAddress)
@@ -1710,6 +1745,32 @@ void RewriteInstance::disassemblePLTSectionX86(BinarySection &Section,
 
     BinaryFunction *BF = createPLTBinaryFunction(
         TargetAddress, SectionAddress + EntryOffset, EntrySize);
+
+    // Pre-symbolize the pc-relative references of the entry so that every
+    // reference (GOT slot loads, the "jmp PLT0" tail branch) binds to the
+    // symbol at its own target address and the emitter re-encodes it
+    // against the new section layout. The single symbol later passed to
+    // handlePLTEntry cannot distinguish the two GOT slots referenced by
+    // the PLT0 header. Run after createPLTBinaryFunction so that symbols
+    // registered for GOT slots (e.g. "free@GOT") are reused.
+    if (opts::Rewrite && BF && !Instructions.empty()) {
+      uint64_t Offset = 0;
+      for (MCInst &Inst : Instructions) {
+        const uint64_t Size = BC->MIB->getSize(Inst).value_or(0);
+        BC->MIB->symbolizePLTRefs(Inst, SectionAddress + EntryOffset + Offset,
+                                  Size, BC->Ctx.get(), [this](uint64_t Addr) {
+                                    return BC->getOrCreateGlobalSymbol(
+                                        Addr, "DATAat");
+                                  });
+        // A direct branch converted to a symbolic target outside the entry
+        // (e.g. the "jmp PLT0" tail) is a tail call: mark it so that CFG
+        // validation accepts the entry function.
+        if (BC->MIB->isBranch(Inst) && !BC->MIB->isIndirectBranch(Inst) &&
+            BC->MIB->getTargetSymbol(Inst))
+          BC->MIB->convertJmpToTailCall(Inst);
+        Offset += Size;
+      }
+    }
 
     // In rewrite mode, disassemble the entry body so it can be emitted as a
     // function with retargeted GOT references (handlePLTEntry).
