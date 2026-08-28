@@ -6436,6 +6436,13 @@ void RewriteInstance::patchELFAllocatableRelaSections(
         NewRelA.r_offset = RelOffset;
         NewRelA.r_addend = Addend;
 
+        LLVM_DEBUG(dbgs() << "BOLT-DEBUG: writeRela: addend 0x"
+                          << Twine::utohexstr(Rel.Addend) << " -> 0x"
+                          << Twine::utohexstr(Addend)
+                          << " sym=" << (Symbol ? Symbol->getName() : "<none>")
+                          << " r_offset=0x" << Twine::utohexstr(RelOffset)
+                          << '\n');
+
         const bool IsJmpRel = IsJmpRelocation.contains(Rel.Type);
         uint64_t &Offset = IsJmpRel ? RelPltOffset : RelDynOffset;
         const uint64_t &EndOffset =
@@ -6823,16 +6830,36 @@ Error RewriteInstance::readELFDynamic(ELFObjectFile<ELFT> *File) {
 }
 
 uint64_t RewriteInstance::getNewFunctionAddress(uint64_t OldAddress) {
-  const BinaryFunction *Function = BC->getBinaryFunctionAtAddress(OldAddress);
+  BinaryFunction *Function = BC->getBinaryFunctionAtAddress(OldAddress);
   if (!Function)
     return 0;
 
-  return Function->getOutputAddress();
+  // The lookup may resolve through a symbol registered at \p OldAddress
+  // inside a function body (e.g. a pointer into the middle of a
+  // function). Preserve the intra-function offset when mapping to the
+  // new function address; it is zero for exact entry addresses.
+  // ICF folding may resolve the lookup through a symbol of a folded
+  // function to the folding survivor; the delta below would then be an
+  // arbitrary inter-function distance, so return the survivor's entry
+  // address instead (the pre-existing behavior for folded symbols).
+  if (!Function->containsAddress(OldAddress))
+    return Function->getOutputAddress();
+  return Function->getOutputAddress() + (OldAddress - Function->getAddress());
 }
 
 uint64_t RewriteInstance::getNewFunctionOrDataAddress(uint64_t OldAddress) {
   if (uint64_t Function = getNewFunctionAddress(OldAddress))
     return Function;
+
+  // An address inside a regular function body with no symbol registered
+  // at it (e.g. a static pointer to func+offset) maps to the same offset
+  // from the function's new address. PLT entries are excluded: linker
+  // relocations reference them with tagged addends (e.g. PLT32 addend+1)
+  // whose offset must not be preserved.
+  if (const BinaryFunction *BF =
+          BC->getBinaryFunctionContainingAddress(OldAddress))
+    if (BF->getOutputAddress() && !BF->isPLTFunction())
+      return BF->getOutputAddress() + (OldAddress - BF->getAddress());
 
   const BinaryData *BD = BC->getBinaryDataAtAddress(OldAddress);
   if (BD && BD->isMoved())
