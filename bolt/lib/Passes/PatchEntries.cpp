@@ -100,7 +100,18 @@ Error PatchEntries::runOnFunctions(BinaryContext &BC) {
 
     if (!Success) {
       // If the original function entries cannot be patched, then we cannot
-      // safely emit new function body.
+      // safely emit new function body. Golang functions are exempt: the
+      // Golang pclntab rewrite requires every Go function to be emitted
+      // (leaving one at its original address corrupts the functab order),
+      // and the original entry point keeps executing the intact original
+      // body, so skipping the patch is safe - mirroring the AArch64
+      // behavior above.
+      if (opts::GolangPass != opts::GV_NONE) {
+        BC.errs() << "BOLT-WARNING: failed to patch entries in " << Function
+                  << ". Skipping entry patching, keeping the function "
+                     "emitted.\n";
+        continue;
+      }
       BC.errs() << "BOLT-WARNING: failed to patch entries in " << Function
                 << ". The function will not be optimized\n";
       Function.setIgnored();
