@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bolt/Passes/PatchEntries.h"
+#include "bolt/Utils/CommandLineOpts.h"
 #include "bolt/Utils/NameResolver.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
@@ -110,7 +111,17 @@ void PatchEntries::runOnFunctions(BinaryContext &BC) {
       }
 
       // If the original function entries cannot be patched, then we cannot
-      // safely emit new function body.
+      // safely emit new function body. Golang functions are exempt: the
+      // Golang pclntab rewrite requires every Go function to be emitted
+      // (leaving one at its original address corrupts the functab order),
+      // and the original entry point keeps executing the intact original
+      // body, so skipping the patch is safe - mirroring the AArch64
+      // behavior above.
+      if (opts::GolangPass != opts::GV_NONE) {
+        errs() << "BOLT-WARNING: failed to patch entries in " << Function
+               << ". Skipping entry patching, keeping the function emitted.\n";
+        continue;
+      }
       errs() << "BOLT-WARNING: failed to patch entries in " << Function
              << ". The function will not be optimized.\n";
       Function.setIgnored();
