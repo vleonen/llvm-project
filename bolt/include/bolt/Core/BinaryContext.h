@@ -21,6 +21,7 @@
 #include "bolt/Core/JumpTable.h"
 #include "bolt/Core/MCPlusBuilder.h"
 #include "bolt/RuntimeLibs/RuntimeLibrary.h"
+#include "bolt/Utils/NameResolver.h"
 #include "llvm/ADT/AddressRanges.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/EquivalenceClasses.h"
@@ -620,6 +621,33 @@ public:
   /// Return all functions for this rewrite instance.
   const std::map<uint64_t, BinaryFunction> &getBinaryFunctions() const {
     return BinaryFunctions;
+  }
+
+  /// Return BF by name. If the global function was not found return the first
+  /// found local
+  BinaryFunction *getBinaryFunctionByName(StringRef Name) {
+    BinaryData *Data = getFirstBinaryDataByName(Name);
+    if (!Data)
+      return nullptr;
+
+    return getBinaryFunctionAtAddress(Data->getAddress());
+  }
+
+  const BinaryFunction *getBinaryFunctionByName(StringRef Name) const {
+    return const_cast<BinaryContext *>(this)->getBinaryFunctionByName(Name);
+  }
+
+  /// Return BinaryData for the given \p Name
+  /// If the data was not found return first local BinaryData or nullptr
+  BinaryData *getFirstBinaryDataByName(StringRef Name) {
+    BinaryData *Data = getBinaryDataByName(Name);
+    if (!Data)
+      return getBinaryDataByName(NameResolver::uniquifyID(Name, 1));
+    return Data;
+  }
+
+  const BinaryData *getFirstBinaryDataByName(StringRef Name) const {
+    return const_cast<BinaryContext *>(this)->getFirstBinaryDataByName(Name);
   }
 
   /// Create BOLT-injected function

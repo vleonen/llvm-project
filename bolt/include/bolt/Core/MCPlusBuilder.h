@@ -35,6 +35,7 @@
 #include "llvm/Support/RWMutex.h"
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <system_error>
@@ -1689,6 +1690,21 @@ public:
                               const MCSymbol *PLTSymbol, MCContext *Ctx) {
     llvm_unreachable("not implemented");
     return false;
+  }
+
+  /// Convert raw pc-relative references of a PLT instruction disassembled
+  /// without symbolization (see disassemblePLTSectionX86 in -rewrite mode)
+  /// into symbolic operands so that the emitter re-encodes them against
+  /// final addresses: direct branch targets (e.g. "jmp <PLT0>") become
+  /// branch-target symbols, rip-relative memory displacements (e.g. GOT
+  /// slot references) become symbols at the referenced address. \p
+  /// GetOrCreateSymbolAt returns an existing symbol registered at the
+  /// address or creates a new one. Returns the number of converted
+  /// operands.
+  virtual unsigned symbolizePLTRefs(
+      MCInst &Inst, uint64_t InstAddr, uint64_t InstSize, MCContext *Ctx,
+      const std::function<MCSymbol *(uint64_t)> &GetOrCreateSymbolAt) const {
+    return 0;
   }
 
   virtual bool analyzeVirtualMethodCall(InstructionIterator Begin,

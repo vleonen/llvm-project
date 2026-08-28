@@ -746,26 +746,89 @@ public:
   bool handlePLTEntry(InstructionIterator Begin, InstructionIterator End,
                       const MCSymbol *PLTSymbol, MCContext *Ctx) override {
     int Count = 0;
+    int SymbolicCount = 0;
     for (auto I = Begin; I != End; ++I) {
+      // Count symbolic direct-branch targets (e.g. the "jmp <PLT0>" tail
+      // symbolized by symbolizePLTRefs) as handled so that lazy stub
+      // entries (endbr64; push $Idx; jmp <PLT0>) pass PLT processing.
+      if ((isBranch(*I) || isCall(*I)) && !isIndirectBranch(*I) &&
+          I->getNumOperands() > 0 && I->getOperand(0).isExpr()) {
+        ++SymbolicCount;
+        continue;
+      }
       int MemOpNo = getMemoryOperandNo(*I);
       if (MemOpNo < 0)
+        continue;
+      // Only rip-relative references may be retargeted. Absolute or
+      // register-based displacements (e.g. the "nopl 0x0(%rax)" padding of
+      // the PLT0 header) must keep their original encoding: binding them
+      // to a symbol changes the chosen instruction encoding and size.
+      unsigned BaseOp = static_cast<unsigned>(MemOpNo + X86::AddrBaseReg);
+      if (BaseOp >= I->getNumOperands() ||
+          I->getOperand(BaseOp).getReg() != X86::RIP)
         continue;
       unsigned DispOp = static_cast<unsigned>(MemOpNo + X86::AddrDisp);
       if (DispOp >= I->getNumOperands())
         continue;
       MCOperand &Disp = I->getOperand(DispOp);
       // Skip already-symbolic displacements (e.g. PLT0 per-ref retargeting).
-      if (Disp.isExpr())
+      if (Disp.isExpr()) {
+        ++SymbolicCount;
         continue;
+      }
       // Only retarget raw immediate displacements (the common case).
       if (!Disp.isImm())
         continue;
-      int64_t Val;
       if (setOperandToSymbolRef(*I, DispOp, PLTSymbol, /*Addend=*/0, Ctx,
                                 ELF::R_X86_64_PC32))
         ++Count;
     }
-    return Count > 0;
+    return Count > 0 || SymbolicCount > 0;
+  }
+
+  unsigned symbolizePLTRefs(MCInst &Inst, uint64_t InstAddr, uint64_t InstSize,
+                            MCContext *Ctx,
+                            const std::function<MCSymbol *(uint64_t)>
+                                &GetOrCreateSymbolAt) const override {
+    unsigned Count = 0;
+
+    // A direct branch with a raw immediate target (e.g. the "jmp <PLT0>"
+    // tail of a lazy PLT entry). The raw disassembler leaves the
+    // pc-relative displacement in the target operand; replace it with a
+    // symbol at the absolute target address so that the emitter re-encodes
+    // the branch against the new location of the target.
+    if (isUnconditionalBranch(Inst) && Inst.getNumOperands() > 0 &&
+        Inst.getOperand(0).isImm()) {
+      const int64_t Disp = Inst.getOperand(0).getImm();
+      if (MCSymbol *Sym = GetOrCreateSymbolAt(InstAddr + InstSize + Disp)) {
+        replaceBranchTarget(Inst, Sym, Ctx);
+        ++Count;
+      }
+    }
+
+    // A rip-relative memory reference with a raw immediate displacement
+    // (e.g. GOT slot references in PLT entries and the PLT0 header). Bind
+    // the displacement to a symbol at the referenced address so that the
+    // emitter re-encodes it against the new location of the referenced
+    // object. The single symbol passed to handlePLTEntry cannot be used
+    // here: the PLT0 header references two different GOT slots.
+    int MemOpNo = getMemoryOperandNo(Inst);
+    if (MemOpNo >= 0) {
+      unsigned BaseOp = static_cast<unsigned>(MemOpNo + X86::AddrBaseReg);
+      unsigned DispOp = static_cast<unsigned>(MemOpNo + X86::AddrDisp);
+      if (BaseOp < Inst.getNumOperands() && DispOp < Inst.getNumOperands() &&
+          Inst.getOperand(BaseOp).getReg() == X86::RIP &&
+          Inst.getOperand(DispOp).isImm()) {
+        uint64_t Ref = 0;
+        if (evaluateMemOperandTarget(Inst, Ref, InstAddr, InstSize)) {
+          if (MCSymbol *Sym = GetOrCreateSymbolAt(Ref))
+            if (setOperandToSymbolRef(Inst, DispOp, Sym, /*Addend=*/0, Ctx,
+                                      ELF::R_X86_64_PC32))
+              ++Count;
+        }
+      }
+    }
+    return Count;
   }
 
   /// Get the registers used as function parameters.
