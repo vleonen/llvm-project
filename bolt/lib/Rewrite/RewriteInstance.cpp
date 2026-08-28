@@ -6048,14 +6048,29 @@ void RewriteInstance::patchELFGOT(ELFObjectFile<ELFT> *File) {
          Entry <
          reinterpret_cast<const uint64_t *>(Contents.data() + Contents.size());
          ++Entry) {
+      // Lazy .got.plt entries contain addresses inside PLT entries (e.g.
+      // of the "push" instruction that triggers lazy resolution). Map
+      // them through the PLT BinaryFunction so that the intra-entry
+      // offset is preserved and the entry lands in the re-emitted .plt.
+      // The generic section-delta fallback below cannot be used here: it
+      // would map through the original .plt section, which is renamed and
+      // not emitted in -rewrite mode.
+      uint64_t NewAddress = 0;
+      if (SectionName == ".got.plt" && opts::Rewrite) {
+        if (const BinaryFunction *BF =
+                BC->getBinaryFunctionContainingAddress(*Entry))
+          if (BF->isPLTFunction() && BF->getOutputAddress())
+            NewAddress = BF->getOutputAddress() + (*Entry - BF->getAddress());
+      }
       // In rewrite mode, .got entries may reference data (e.g. pointers to
       // variables in statically linked binaries with no dynamic relocs).
       // getNewFunctionAddress would return 0 for those, leaving stale input
       // addresses in the output. Use getNewFunctionOrDataAddress whose
       // rewrite-mode section-delta fallback can map any allocatable address.
-      const uint64_t NewAddress = (UseDataAddr || opts::Rewrite)
-                                      ? getNewFunctionOrDataAddress(*Entry)
-                                      : getNewFunctionAddress(*Entry);
+      if (!NewAddress)
+        NewAddress = (UseDataAddr || opts::Rewrite)
+                         ? getNewFunctionOrDataAddress(*Entry)
+                         : getNewFunctionAddress(*Entry);
       if (!NewAddress || NewAddress == *Entry)
         continue;
       LLVM_DEBUG(dbgs() << "BOLT-DEBUG: patching " << SectionName << " entry 0x"
