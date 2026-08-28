@@ -6922,6 +6922,17 @@ uint64_t RewriteInstance::getNewFunctionOrDataAddress(uint64_t OldAddress) {
   // including virtual sections like .bss that may not have BinaryData entries.
   if (opts::Rewrite) {
     ErrorOr<BinarySection &> Section = BC->getSectionForAddress(OldAddress);
+    if (!Section) {
+      // Addresses at the very end of a section (e.g. exclusive end markers
+      // such as runtime.enoptrdata) are not contained in any section by
+      // the strict lookup above. Match them against section end addresses
+      // and map through the section layout delta.
+      for (BinarySection &Sec : BC->allocatableSections()) {
+        if (OldAddress && Sec.getAddress() &&
+            OldAddress == Sec.getEndAddress() && Sec.getOutputAddress())
+          return Sec.getOutputAddress() + (OldAddress - Sec.getAddress());
+      }
+    }
     if (Section && Section->getOutputAddress()) {
       const uint64_t SectionDelta =
           Section->getOutputAddress() - Section->getAddress();
