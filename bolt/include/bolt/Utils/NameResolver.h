@@ -40,11 +40,16 @@ public:
     return (Name + Twine(Sep) + Twine(ID)).str();
   }
 
+  /// Return unique version of the \p Name in the form "Name<Sep><Number>".
+  static std::string uniquifyID(StringRef Name, uint64_t ID) {
+    return (Name + Twine(Sep) + Twine(ID)).str();
+  }
+
   /// Register new version of \p Name and return unique version in the form
   /// "Name<Sep><Number>".
   std::string uniquify(StringRef Name) {
     const uint64_t ID = ++Counters[Name];
-    return getUniqueName(Name, ID);
+    return uniquifyID(Name, ID);
   }
 
   /// For uniquified \p Name, return the original form (that may no longer be
