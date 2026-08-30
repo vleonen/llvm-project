@@ -1,0 +1,112 @@
+// BOLT test for goroutine_indirect.go
+// Tests complex BOLT workflow with concurrent Go program and stress testing
+//
+// RUN: rm -f %t.fdata %t.inst.out %t.bolt.out 2>/dev/null || true
+//
+// RUN: go build -buildmode=pie %goopt -gcflags=all=-d=go119usejumptables=0 %goldflags -buildvcs=false -a -o %t.exe %S/Inputs/goroutine_indirect.go 2>&1
+//
+// RUN: %t.exe > %t.exe.original.out 2>&1 || echo "Exit code: $?" > %t.exe.exit
+// RUN: not grep -i fatal %t.exe.original.out
+// RUN: not grep -i panic %t.exe.original.out
+// RUN: not grep -i error %t.exe.original.out
+// RUN: not grep -i error %t.exe.exit
+//
+// RUN: llvm-bolt %t.exe -o %t.inst --golang=1.24 -instrument -instrumentation-file=%t.fdata --debug-only=bolt-instrumentation 2>&1 | FileCheck %s --check-prefix=CHECK-INSTRUMENT
+//
+// RUN: [ x86_64 = $(uname -m) ] && llvm-objdump --disassemble-symbols=main.worker %t.inst 2>&1 | FileCheck %s --check-prefix=CHECK-DISASM-X86 || true
+// RUN: [ aarch64 = $(uname -m) ] && llvm-objdump --disassemble-symbols=main.worker %t.inst 2>&1 | FileCheck %s --check-prefix=CHECK-DISASM-ARM64 || true
+//
+// RUN: %t.inst > %t.inst.out 2>&1 || echo "Exit code: $?" > %t.inst.exit
+// RUN: not grep -i fatal %t.inst.out
+// RUN: not grep -i panic %t.inst.out
+// RUN: not grep -i error %t.inst.out
+// RUN: not grep -i error %t.inst.exit
+//
+// RUN: test -s %t.fdata
+//
+// RUN: llvm-bolt %t.exe -o %t.bolt --golang=1.24 -data %t.fdata 2>&1
+//
+// RUN: %t.bolt > %t.bolt.out 2>&1 || echo "Exit code: $?" > %t.bolt.exit
+// RUN: not grep -i fatal %t.bolt.out
+// RUN: not grep -i panic %t.bolt.out
+// RUN: not grep -i error %t.bolt.out
+// RUN: not grep -i error %t.bolt.exit
+//
+// RUN: diff %t.exe.original.out %t.inst.out
+// RUN: diff %t.exe.original.out %t.bolt.out
+//
+// RUN: llvm-bolt %t.exe -o %t.bolt.ext-tsp-hfsort --golang=1.24 -data %t.fdata -reorder-blocks=ext-tsp -reorder-functions=hfsort 2>&1
+// RUN: %t.bolt.ext-tsp-hfsort > %t.bolt.ext-tsp-hfsort.out 2>&1 || echo "Exit code: $?" > %t.bolt.ext-tsp-hfsort.exit
+// RUN: not grep -i fatal %t.bolt.ext-tsp-hfsort.out
+// RUN: diff %t.exe.original.out %t.bolt.ext-tsp-hfsort.out
+//
+// RUN: llvm-bolt %t.exe -o %t.bolt.ext-tsp-hfsort-rewrite --golang=1.24 -data %t.fdata -reorder-blocks=ext-tsp -reorder-functions=hfsort -rewrite 2>&1
+// RUN: %t.bolt.ext-tsp-hfsort-rewrite > %t.bolt.ext-tsp-hfsort-rewrite.out 2>&1 || echo "Exit code: $?" > %t.bolt.ext-tsp-hfsort-rewrite.exit
+// RUN: not grep -i fatal %t.bolt.ext-tsp-hfsort-rewrite.out
+// RUN: diff %t.exe.original.out %t.bolt.ext-tsp-hfsort-rewrite.out
+//
+//
+// --- Full PIE variant (external linker keeps -pie; no -no-pie) ---
+//
+// RUN: rm -f %t.pie.fdata %t.pie.inst.out %t.pie.bolt.out 2>/dev/null || true
+//
+// RUN: go build -buildmode=pie %goopt -gcflags=all=-d=go119usejumptables=0 %pieflags -buildvcs=false -a -o %t.pie.exe %S/Inputs/goroutine_indirect.go 2>&1
+//
+// RUN: %t.pie.exe > %t.pie.exe.original.out 2>&1 || echo "Exit code: $?" > %t.pie.exe.exit
+// RUN: not grep -i fatal %t.pie.exe.original.out
+// RUN: not grep -i panic %t.pie.exe.original.out
+// RUN: not grep -i error %t.pie.exe.original.out
+// RUN: not grep -i error %t.pie.exe.exit
+//
+// RUN: llvm-bolt %t.pie.exe -o %t.pie.inst --golang=1.24 -instrument -instrumentation-file=%t.pie.fdata --debug-only=bolt-instrumentation 2>&1 | FileCheck %s --check-prefix=CHECK-INSTRUMENT
+//
+// RUN: [ x86_64 = $(uname -m) ] && llvm-objdump --disassemble-symbols=main.worker %t.pie.inst 2>&1 | FileCheck %s --check-prefix=CHECK-DISASM-X86 || true
+// RUN: [ aarch64 = $(uname -m) ] && llvm-objdump --disassemble-symbols=main.worker %t.pie.inst 2>&1 | FileCheck %s --check-prefix=CHECK-DISASM-ARM64 || true
+//
+// RUN: %t.pie.inst > %t.pie.inst.out 2>&1 || echo "Exit code: $?" > %t.pie.inst.exit
+// RUN: not grep -i fatal %t.pie.inst.out
+// RUN: not grep -i panic %t.pie.inst.out
+// RUN: not grep -i error %t.pie.inst.out
+// RUN: not grep -i error %t.pie.inst.exit
+//
+// RUN: test -s %t.pie.fdata
+//
+// RUN: llvm-bolt %t.pie.exe -o %t.pie.bolt --golang=1.24 -data %t.pie.fdata 2>&1
+//
+// RUN: %t.pie.bolt > %t.pie.bolt.out 2>&1 || echo "Exit code: $?" > %t.pie.bolt.exit
+// RUN: not grep -i fatal %t.pie.bolt.out
+// RUN: not grep -i panic %t.pie.bolt.out
+// RUN: not grep -i error %t.pie.bolt.out
+// RUN: not grep -i error %t.pie.bolt.exit
+//
+// RUN: diff %t.pie.exe.original.out %t.pie.inst.out
+// RUN: diff %t.pie.exe.original.out %t.pie.bolt.out
+//
+// RUN: llvm-bolt %t.pie.exe -o %t.pie.bolt.ext-tsp-hfsort --golang=1.24 -data %t.pie.fdata -reorder-blocks=ext-tsp -reorder-functions=hfsort 2>&1
+// RUN: %t.pie.bolt.ext-tsp-hfsort > %t.pie.bolt.ext-tsp-hfsort.out 2>&1 || echo "Exit code: $?" > %t.pie.bolt.ext-tsp-hfsort.exit
+// RUN: not grep -i fatal %t.pie.bolt.ext-tsp-hfsort.out
+// RUN: diff %t.pie.exe.original.out %t.pie.bolt.ext-tsp-hfsort.out
+//
+// RUN: llvm-bolt %t.pie.exe -o %t.pie.bolt.ext-tsp-hfsort-rewrite --golang=1.24 -data %t.pie.fdata -reorder-blocks=ext-tsp -reorder-functions=hfsort -rewrite 2>&1
+// RUN: %t.pie.bolt.ext-tsp-hfsort-rewrite > %t.pie.bolt.ext-tsp-hfsort-rewrite.out 2>&1 || echo "Exit code: $?" > %t.pie.bolt.ext-tsp-hfsort-rewrite.exit
+// RUN: not grep -i fatal %t.pie.bolt.ext-tsp-hfsort-rewrite.out
+// RUN: diff %t.pie.exe.original.out %t.pie.bolt.ext-tsp-hfsort-rewrite.out
+//
+//
+// CHECK-INSTRUMENT: Creating 5 instructions for main.worker
+//
+// CHECK-DISASM-ARM64: main.worker>
+// CHECK-DISASM-ARM64-NEXT: ldr	x17, [x28, #0x10]
+// CHECK-DISASM-ARM64-NEXT: sub	x19, sp, #0x2, lsl #12
+// CHECK-DISASM-ARM64-NEXT: sub	x19, x19,
+// CHECK-DISASM-ARM64-NEXT: cmp	x19, x17
+// CHECK-DISASM-ARM64-NEXT: b.ls
+//
+// CHECK-DISASM-X86: main.worker>
+// CHECK-DISASM-X86-NEXT: movq	0x10(%r14), %r13
+// CHECK-DISASM-X86-NEXT: leaq	-0x4000(%rsp), %r12
+// CHECK-DISASM-X86-NEXT: subq	$0x10, %r12
+// CHECK-DISASM-X86-NEXT: cmpq	%r12, %r13
+// CHECK-DISASM-X86-NEXT: jle
+//
+// REQUIRES: gc,gc124

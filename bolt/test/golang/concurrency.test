@@ -1,0 +1,87 @@
+// BOLT test for concurrency.go
+// Implements complete 6-step BOLT workflow with proper validation
+//
+// RUN: rm -f %t.fdata %t.inst.out %t.bolt.out 2>/dev/null || true
+//
+// RUN: go build -buildmode=pie %goopt -gcflags=all=-d=go119usejumptables=0 %goldflags -buildvcs=false -a -o %t.exe %S/Inputs/concurrency.go 2>&1
+//
+// RUN: %t.exe > %t.exe.original.out 2>&1
+// RUN: FileCheck %s --check-prefix=CONCURRENCY < %t.exe.original.out
+//
+// RUN: llvm-bolt %t.exe -o %t.inst --golang=1.24 -instrument -instrumentation-file=%t.fdata 2>&1
+//
+// RUN: %t.inst > %t.inst.out 2>&1
+// RUN: FileCheck %s --check-prefix=CONCURRENCY < %t.inst.out
+//
+// RUN: test -s %t.fdata
+//
+// RUN: llvm-bolt %t.exe -o %t.bolt --golang=1.24 -data %t.fdata 2>&1
+//
+// RUN: %t.bolt > %t.bolt.out 2>&1
+// RUN: FileCheck %s --check-prefix=CONCURRENCY < %t.bolt.out
+//
+// RUN: diff %t.exe.original.out %t.inst.out
+// RUN: diff %t.exe.original.out %t.bolt.out
+//
+// RUN: test -s %t.inst
+// RUN: test -s %t.bolt
+// RUN: test $(wc -c < %t.inst) -gt 1048576
+// RUN: test $(wc -c < %t.bolt) -gt 1048576
+//
+// RUN: not grep ERROR %t.inst.out
+// RUN: not grep fatal %t.bolt.out
+//
+// RUN: llvm-bolt %t.exe -o %t.bolt.ext-tsp-hfsort --golang=1.24 -data %t.fdata -reorder-blocks=ext-tsp -reorder-functions=hfsort 2>&1
+// RUN: %t.bolt.ext-tsp-hfsort > %t.bolt.ext-tsp-hfsort.out 2>&1
+// RUN: diff %t.exe.original.out %t.bolt.ext-tsp-hfsort.out
+//
+// RUN: llvm-bolt %t.exe -o %t.bolt.ext-tsp-hfsort-rewrite --golang=1.24 -data %t.fdata -reorder-blocks=ext-tsp -reorder-functions=hfsort -rewrite 2>&1
+// RUN: %t.bolt.ext-tsp-hfsort-rewrite > %t.bolt.ext-tsp-hfsort-rewrite.out 2>&1
+// RUN: diff %t.exe.original.out %t.bolt.ext-tsp-hfsort-rewrite.out
+//
+// CONCURRENCY: Processed 20 jobs
+//
+//
+// --- Full PIE variant (external linker keeps -pie; no -no-pie) ---
+//
+// RUN: rm -f %t.pie.fdata %t.pie.inst.out %t.pie.bolt.out 2>/dev/null || true
+//
+// RUN: go build -buildmode=pie %goopt -gcflags=all=-d=go119usejumptables=0 %pieflags -buildvcs=false -a -o %t.pie.exe %S/Inputs/concurrency.go 2>&1
+//
+// RUN: %t.pie.exe > %t.pie.exe.original.out 2>&1
+// RUN: FileCheck %s --check-prefix=CONCURRENCY < %t.pie.exe.original.out
+//
+// RUN: llvm-bolt %t.pie.exe -o %t.pie.inst --golang=1.24 -instrument -instrumentation-file=%t.pie.fdata 2>&1
+//
+// RUN: %t.pie.inst > %t.pie.inst.out 2>&1
+// RUN: FileCheck %s --check-prefix=CONCURRENCY < %t.pie.inst.out
+//
+// RUN: test -s %t.pie.fdata
+//
+// RUN: llvm-bolt %t.pie.exe -o %t.pie.bolt --golang=1.24 -data %t.pie.fdata 2>&1
+//
+// RUN: %t.pie.bolt > %t.pie.bolt.out 2>&1
+// RUN: FileCheck %s --check-prefix=CONCURRENCY < %t.pie.bolt.out
+//
+// RUN: diff %t.pie.exe.original.out %t.pie.inst.out
+// RUN: diff %t.pie.exe.original.out %t.pie.bolt.out
+//
+// RUN: test -s %t.pie.inst
+// RUN: test -s %t.pie.bolt
+// RUN: test $(wc -c < %t.pie.inst) -gt 1048576
+// RUN: test $(wc -c < %t.pie.bolt) -gt 1048576
+//
+// RUN: not grep ERROR %t.pie.inst.out
+// RUN: not grep fatal %t.pie.bolt.out
+//
+// RUN: llvm-bolt %t.pie.exe -o %t.pie.bolt.ext-tsp-hfsort --golang=1.24 -data %t.pie.fdata -reorder-blocks=ext-tsp -reorder-functions=hfsort 2>&1
+// RUN: %t.pie.bolt.ext-tsp-hfsort > %t.pie.bolt.ext-tsp-hfsort.out 2>&1
+// RUN: diff %t.pie.exe.original.out %t.pie.bolt.ext-tsp-hfsort.out
+//
+// RUN: llvm-bolt %t.pie.exe -o %t.pie.bolt.ext-tsp-hfsort-rewrite --golang=1.24 -data %t.pie.fdata -reorder-blocks=ext-tsp -reorder-functions=hfsort -rewrite 2>&1
+// RUN: %t.pie.bolt.ext-tsp-hfsort-rewrite > %t.pie.bolt.ext-tsp-hfsort-rewrite.out 2>&1
+// RUN: diff %t.pie.exe.original.out %t.pie.bolt.ext-tsp-hfsort-rewrite.out
+//
+//
+//
+// REQUIRES: gc,gc124
