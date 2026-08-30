@@ -58,6 +58,28 @@ list(APPEND BOLT_TEST_DEPS
 add_custom_target(bolt-test-depends DEPENDS ${BOLT_TEST_DEPS})
 set_target_properties(bolt-test-depends PROPERTIES FOLDER "BOLT")
 
+# Go compiler detection for golang tests
+find_program(BOLT_GC_EXE NAMES go)
+if(BOLT_GC_EXE)
+  execute_process(COMMAND ${BOLT_GC_EXE} version
+    OUTPUT_VARIABLE BOLT_GC_VERSION_OUTPUT
+    ERROR_QUIET)
+  if(BOLT_GC_VERSION_OUTPUT MATCHES "go([0-9]+\\.[0-9]+)")
+    set(BOLT_GC_VERSION "${CMAKE_MATCH_1}")
+  endif()
+  set(BOLT_FOUND_GC TRUE)
+  message(STATUS "Found Go compiler: ${BOLT_GC_EXE} version ${BOLT_GC_VERSION}")
+else()
+  set(BOLT_FOUND_GC FALSE)
+  set(BOLT_GC_VERSION "not-found")
+  message(STATUS "Go compiler not found - golang tests will be skipped")
+endif()
+
+# Cache variables for lit.site.cfg.py.in
+set(GO_EXECUTABLE "${BOLT_GC_EXE}" CACHE PATH "Go compiler executable")
+set(BOLT_GC_EXE "${BOLT_GC_EXE}" CACHE PATH "BOLT Go compiler path")
+set(BOLT_GC_VERSION "${BOLT_GC_VERSION}" CACHE STRING "BOLT Go compiler version")
+
 add_lit_testsuite(check-bolt "Running the BOLT regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
   PARAMS ${BOLT_TEST_PARAMS}

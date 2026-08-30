@@ -20,6 +20,11 @@ config.bolt_lld = "@BOLT_LLD_EXE@"
 config.targets_to_build = "@BOLT_TARGETS_TO_BUILD@"
 config.gnu_ld = "@GNU_LD_EXECUTABLE@"
 
+# Go compiler configuration for BOLT golang tests
+config.go_executable = "@GO_EXECUTABLE@"
+config.bolt_gc_path = "@BOLT_GC_EXE@"
+config.bolt_gc_version = "@BOLT_GC_VERSION@"
+
 import lit.llvm
 lit.llvm.initialize(lit_config, config)
 
