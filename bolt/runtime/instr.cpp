@@ -346,6 +346,13 @@ public:
     return forEachElement(Callback, InitialSize, TableRoot, args...);
   }
 
+  /// Release a possibly orphaned lock. Only valid when every process that
+  /// could hold it is known to be dead (the forked dumper confirmed the
+  /// parent process group exited): a mutex still set at that point was
+  /// held by a thread killed by exit_group() mid-critical-section and
+  /// nobody can ever release it.
+  void forceUnlock() { M.release(); }
+
   void resetCounters();
 
 private:
@@ -1560,6 +1567,17 @@ __bolt_instr_data_dump(int FD) {
   DEBUG(report("Finished writing profile.\n"));
 }
 
+/// Release indirect call table locks whose holder was killed by
+/// exit_group() in the middle of the critical section, leaving the mutex
+/// set forever in the memory shared with this forked dumper. Only valid
+/// when every process that could hold a lock is known to be dead, i.e.
+/// when the whole parent process group exited. Without this, the final
+/// profile dump would spin forever on a mutex no one can release anymore.
+static void unlockOrphanedTables() {
+  for (int I = 0; I < __bolt_instr_num_ind_calls; ++I)
+    GlobalIndCallCounters[I].forceUnlock();
+}
+
 /// Event loop for our child process spawned during setup to dump profile data
 /// at user-specified intervals
 void watchProcess() {
@@ -1577,6 +1595,7 @@ void watchProcess() {
     ppid = __getppid();
     if (ppid == 1) {
       // Parent already dead
+      unlockOrphanedTables();
       __bolt_instr_data_dump(FD);
       goto out;
     }
@@ -1589,6 +1608,8 @@ void watchProcess() {
     // This means our parent process or all its forks are dead,
     // so no need for us to keep dumping.
     if (__kill(ppid, 0) < 0) {
+      // Any still-held table lock is orphaned by a dead holder
+      unlockOrphanedTables();
       if (__bolt_instr_no_counters_clear)
         __bolt_instr_data_dump(FD);
       break;
