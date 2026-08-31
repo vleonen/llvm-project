@@ -3,7 +3,7 @@
 //
 // RUN: rm -f %t.fdata %t.inst.out %t.bolt.out 2>/dev/null || true
 //
-// RUN: go build -buildmode=pie %goopt -gcflags=all=-d=go119usejumptables=0 %goldflags -buildvcs=false -a -o %t.exe %S/Inputs/goroutine_indirect.go 2>&1
+// RUN: go build -buildmode=pie %goopt %gcjt %goldflags -buildvcs=false -a -o %t.exe %S/Inputs/goroutine_indirect.go 2>&1
 //
 // RUN: %t.exe > %t.exe.original.out 2>&1 || echo "Exit code: $?" > %t.exe.exit
 // RUN: not grep -i fatal %t.exe.original.out
@@ -50,7 +50,7 @@
 //
 // RUN: rm -f %t.pie.fdata %t.pie.inst.out %t.pie.bolt.out 2>/dev/null || true
 //
-// RUN: go build -buildmode=pie %goopt -gcflags=all=-d=go119usejumptables=0 %pieflags -buildvcs=false -a -o %t.pie.exe %S/Inputs/goroutine_indirect.go 2>&1
+// RUN: go build -buildmode=pie %goopt %gcjt %pieflags -buildvcs=false -a -o %t.pie.exe %S/Inputs/goroutine_indirect.go 2>&1
 //
 // RUN: %t.pie.exe > %t.pie.exe.original.out 2>&1 || echo "Exit code: $?" > %t.pie.exe.exit
 // RUN: not grep -i fatal %t.pie.exe.original.out

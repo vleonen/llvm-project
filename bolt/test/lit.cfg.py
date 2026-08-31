@@ -189,8 +189,15 @@ config.substitutions.append(("%goldflags", "'-ldflags=-linkmode=external -extld=
 config.substitutions.append(("%pieflags", "'-ldflags=-linkmode=external -extld=gcc -extldflags \"-fuse-ld=bfd -Wl,--emit-relocs -Wl,--compress-debug-sections=none\"'"))
 if platform.machine() == 'aarch64':
     config.substitutions.append(("%goopt", "-mappingsymbol"))
+    # BOLT does not support jump tables in Go binaries on AArch64.
+    config.substitutions.append(
+        ("%gcjt", "-gcflags=all=-d=go119usejumptables=0"))
 else:
     config.substitutions.append(("%goopt", ""))
+    # Jump tables in Go binaries are supported on x86-64 (incl. PIE and
+    # -rewrite).
+    config.substitutions.append(
+        ("%gcjt", "-gcflags=all=-d=go119usejumptables=1"))
 
 llvm_config.config.environment["LD_LLD"] = config.bolt_lld
 ld_lld = llvm_config.use_llvm_tool("ld.lld", required=True, search_env="LD_LLD")
