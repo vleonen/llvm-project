@@ -220,15 +220,27 @@ support with the `-golang` option, passing either the exact Go version
 is the recommended and best-tested toolchain. The binary should be linked
 with external linking that preserves relocations and does not compress
 debug sections. Both regular PIE binaries and binaries linked with
-`-no-pie` are supported in all modes, including `-rewrite`. Note that the
-`-gcflags=all=-d=go119usejumptables=0` option is required: it disables the
-generation of jump tables, which BOLT does not support in Go binaries.
-The `all=` prefix is important: a bare `-gcflags=` only applies to the
-packages listed on the command line, while jump tables in standard library
-packages (e.g. `reflect`, `runtime`) would leave dynamic relocations that
-BOLT cannot update:
+`-no-pie` are supported in all modes, including `-rewrite`.
+
+On **AArch64**, the `-gcflags=all=-d=go119usejumptables=0` option is
+required: it disables the generation of jump tables, which BOLT does not
+support in Go binaries on this architecture. The `all=` prefix is
+important: a bare `-gcflags=` only applies to the packages listed on the
+command line, while jump tables in standard library packages (e.g.
+`reflect`, `runtime`) would leave dynamic relocations that BOLT cannot
+update:
 ```
 go build -buildmode=pie -tags=bolt -gcflags=all=-d=go119usejumptables=0 \
+    -ldflags='-linkmode=external -extld=gcc -extldflags "-fuse-ld=bfd -Wl,--emit-relocs -Wl,--compress-debug-sections=none"' \
+    -buildvcs=false -o app.exe main.go
+```
+
+On **x86-64**, jump tables in Go binaries are supported (in regular and
+PIE binaries, including `-rewrite`), so `go119usejumptables=0` is not
+needed. If the flag is passed explicitly, use `=1`; keep the `all=`
+prefix so standard library packages are covered as well:
+```
+go build -buildmode=pie -tags=bolt -gcflags=all=-d=go119usejumptables=1 \
     -ldflags='-linkmode=external -extld=gcc -extldflags "-fuse-ld=bfd -Wl,--emit-relocs -Wl,--compress-debug-sections=none"' \
     -buildvcs=false -o app.exe main.go
 ```
