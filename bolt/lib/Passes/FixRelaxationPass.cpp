@@ -9,6 +9,7 @@
 #include "bolt/Passes/FixRelaxationPass.h"
 #include "bolt/Core/FunctionLayout.h"
 #include "bolt/Core/ParallelUtilities.h"
+#include "bolt/Passes/ADRRelaxationPass.h"
 #include "bolt/Utils/CommandLineOpts.h"
 
 using namespace llvm;
@@ -77,8 +78,33 @@ void FixRelaxations::runOnFunction(BinaryFunction &BF) {
   for (BinaryBasicBlock &BB : BF) {
     for (auto II = BB.begin(); II != BB.end(); ++II) {
       MCInst &Adrp = *II;
-      if (BC.MIB->isPseudo(Adrp) || !BC.MIB->isADRP(Adrp))
+      if (BC.MIB->isPseudo(Adrp))
         continue;
+
+      if (!BC.MIB->isADRP(Adrp)) {
+        // Linker-relaxed ADR+LDR(GOT) pairs also carry __BOLT_got_zero
+        // references: AArch64MCSymbolizer assigns them to every GOT-class
+        // relocation. ADRRelaxationPass converts page-aligned ADRs late in
+        // the pipeline, but the leftover-detection below runs first, so
+        // convert qualifying ADRs here. The conversion is value-identical
+        // for page-aligned targets, and the existing pairing scan below
+        // then retargets the pair. Apply the cross-section re-anchor first
+        // so the pair is resolved through the section that contains the
+        // loaded data; for same-section pairs the GOTENT pairing below
+        // handles the retarget after the conversion.
+        if (!BC.MIB->isADR(Adrp))
+          continue;
+        const MCSymbol *AdrSymbol = BC.MIB->getTargetSymbol(Adrp);
+        if (!AdrSymbol || AdrSymbol->getName() != "__BOLT_got_zero")
+          continue;
+        const int64_t AdrAddend = BC.MIB->getTargetAddend(Adrp);
+        const BinaryData *AdrBD = BC.getBinaryDataByName(AdrSymbol->getName());
+        if (!AdrBD || ((AdrBD->getAddress() + (uint64_t)AdrAddend) & 0xfff))
+          continue;
+        reanchorCrossSectionPair(BC, BB, II, AdrBD,
+                                 AdrBD->getAddress() + (uint64_t)AdrAddend);
+        BC.MIB->convertADRToADRP(Adrp);
+      }
 
       const MCSymbol *AdrpSymbol = BC.MIB->getTargetSymbol(Adrp);
       if (!AdrpSymbol || AdrpSymbol->getName() != "__BOLT_got_zero")

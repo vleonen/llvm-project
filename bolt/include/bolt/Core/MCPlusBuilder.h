@@ -787,6 +787,11 @@ public:
     return false;
   }
 
+  /// Return the destination register of an ADR/ADRP instruction.
+  virtual void getADRReg(const MCInst &Inst, MCPhysReg &RegName) const {
+    llvm_unreachable("not implemented");
+  }
+
   virtual bool isAddXri(const MCInst &Inst) const {
     llvm_unreachable("not implemented");
     return false;
@@ -802,6 +807,10 @@ public:
   virtual bool mayLoad(const MCInst &Inst) const {
     return Info->get(Inst.getOpcode()).mayLoad();
   }
+
+  /// Return the access size in bytes of an unsigned-offset memory
+  /// instruction (the immediate scale), or 0 when unknown.
+  virtual unsigned getMemScale(const MCInst &Inst) const { return 0; }
 
   virtual bool mayStore(const MCInst &Inst) const {
     return Info->get(Inst.getOpcode()).mayStore();

@@ -35,6 +35,22 @@ public:
   void runOnFunction(BinaryFunction &BF);
 };
 
+/// Re-anchor an ADR + LDR pair whose loaded address crosses a section
+/// boundary. \p It points at the ADR computing the page-aligned address
+/// \p PageAddr. Scans forward (skipping NOPs, stopping at a redefinition
+/// of the ADR destination register) for the first load based on that
+/// register. When the loaded address (page + load offset) belongs to a
+/// different section than the page itself, retargets both the ADR and the
+/// LDR to a global symbol placed at the loaded address, so both are
+/// remapped through the section that actually contains the data.
+/// Shared with FixRelaxations, which converts linker-relaxed
+/// __BOLT_got_zero ADRs before its pairing scan (the late-running
+/// ADRRelaxationPass conversion happens after the FixRelaxations safety
+/// net and cannot clear them in time).
+void reanchorCrossSectionPair(BinaryContext &BC, const BinaryBasicBlock &BB,
+                              BinaryBasicBlock::const_iterator It,
+                              const BinaryData *BD, uint64_t PageAddr);
+
 } // namespace bolt
 } // namespace llvm
 

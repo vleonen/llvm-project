@@ -563,6 +563,15 @@ public:
     return Inst.getOpcode() == AArch64::ADR;
   }
 
+  void getADRReg(const MCInst &Inst, MCPhysReg &RegName) const override {
+    assert((isADR(Inst) || isADRP(Inst)) && "Not an ADR instruction");
+    assert(MCPlus::getNumPrimeOperands(Inst) != 0 &&
+           "No operands for ADR instruction");
+    assert(Inst.getOperand(0).isReg() &&
+           "Unexpected operand in ADR instruction");
+    RegName = Inst.getOperand(0).getReg();
+  }
+
   bool isAddXri(const MCInst &Inst) const override {
     return Inst.getOpcode() == AArch64::ADDXri;
   }
@@ -2260,6 +2269,30 @@ public:
     // kind, VK_ABS vs VK_ABS_PAGE), so only the opcode has to change.
     Inst.setOpcode(AArch64::ADRP);
     return true;
+  }
+
+  unsigned getMemScale(const MCInst &Inst) const override {
+    switch (Inst.getOpcode()) {
+    default:
+      return 0;
+    case AArch64::LDRBBui:
+    case AArch64::LDRSBXui:
+    case AArch64::LDRSBWui:
+      return 1;
+    case AArch64::LDRHHui:
+    case AArch64::LDRSHXui:
+    case AArch64::LDRSHWui:
+      return 2;
+    case AArch64::LDRSui:
+    case AArch64::LDRWui:
+    case AArch64::LDRSWui:
+      return 4;
+    case AArch64::LDRDui:
+    case AArch64::LDRXui:
+      return 8;
+    case AArch64::LDRQui:
+      return 16;
+    }
   }
 
   void createUncondBranch(MCInst &Inst, const MCSymbol *TBB,
