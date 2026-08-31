@@ -2252,6 +2252,16 @@ public:
     return true;
   }
 
+  bool convertADRToADRP(MCInst &Inst) const override {
+    if (!isADR(Inst))
+      return false;
+    // The operand denotes the computed address for both ADR and ADRP and
+    // is differentiated at encoding time (via the expression variant
+    // kind, VK_ABS vs VK_ABS_PAGE), so only the opcode has to change.
+    Inst.setOpcode(AArch64::ADRP);
+    return true;
+  }
+
   void createUncondBranch(MCInst &Inst, const MCSymbol *TBB,
                           MCContext *Ctx) const override {
     Inst.setOpcode(AArch64::B);
