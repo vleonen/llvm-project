@@ -12,8 +12,10 @@
 
 #include "bolt/Passes/ADRRelaxationPass.h"
 #include "bolt/Core/BinaryData.h"
+#include "bolt/Core/BinarySection.h"
 #include "bolt/Core/ParallelUtilities.h"
 #include "bolt/Utils/CommandLineOpts.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include <iterator>
 
 using namespace llvm;
@@ -35,6 +37,77 @@ namespace bolt {
 // creating async jobs on the moment of exit. So we're finishing all parallel
 // jobs and checking the exit flag after it.
 static bool PassFailed = false;
+
+// Re-anchor an ADR + LDR pair whose loaded address crosses a section
+// boundary. \p It points at the ADR computing the page-aligned address
+// \p PageAddr. Scans forward (skipping NOPs, stopping at a redefinition
+// of the ADR destination register) for the first load based on that
+// register. When the loaded address (page + load offset) belongs to a
+// different section than the page itself, retargets both the ADR and the
+// LDR to a global symbol placed at the loaded address, so both are
+// remapped through the section that actually contains the data.
+static void reanchorCrossSectionPair(BinaryContext &BC,
+                                     const BinaryBasicBlock &BB,
+                                     BinaryBasicBlock::const_iterator It,
+                                     const BinaryData *BD, uint64_t PageAddr) {
+  MCPhysReg DestReg;
+  BC.MIB->getADRReg(*It, DestReg);
+
+  auto NextIt = std::next(It);
+  while (NextIt != BB.end() && BC.MIB->isNoop(*NextIt))
+    ++NextIt;
+  if (NextIt == BB.end())
+    return;
+
+  const MCInst &Load = *NextIt;
+  if (!BC.MIB->mayLoad(Load) || Load.getNumOperands() <= 2 ||
+      !Load.getOperand(1).isReg() || Load.getOperand(1).getReg() != DestReg)
+    return;
+
+  // The load offset within the page: a symbol-annotated memory operand may
+  // carry either the raw low-12 offset (analyzeRelocation GOT
+  // normalization) or an absolute address (a GOTENT symbol created by
+  // FixRelaxations); decode the scaled immediate otherwise.
+  int64_t LoadOffset = 0;
+  if (const MCSymbol *LoadSymbol = BC.MIB->getTargetSymbol(Load, 2)) {
+    if (const BinaryData *LoadBD =
+            BC.getBinaryDataByName(LoadSymbol->getName()))
+      LoadOffset = LoadBD->getAddress() + BC.MIB->getTargetAddend(Load, 2);
+    if (LoadOffset >= 0x1000)
+      LoadOffset -= PageAddr;
+  } else if (Load.getOperand(2).isImm()) {
+    const unsigned Scale = BC.MIB->getMemScale(Load);
+    if (!Scale)
+      return;
+    LoadOffset = Load.getOperand(2).getImm() * Scale;
+  } else {
+    return;
+  }
+  if (LoadOffset <= 0 || LoadOffset >= 0x1000)
+    return;
+
+  const uint64_t DataAddr = PageAddr + (uint64_t)LoadOffset;
+
+  // Only re-anchor when the pair crosses into a different section: within
+  // a single section the page-based remap is already correct.
+  ErrorOr<BinarySection &> PageSection = BC.getSectionForAddress(PageAddr);
+  ErrorOr<BinarySection &> DataSection = BC.getSectionForAddress(DataAddr);
+  if (!PageSection || !DataSection || &*PageSection == &*DataSection)
+    return;
+
+  auto L = BC.scopeLock();
+  MCSymbol *Anchor = BC.getOrCreateGlobalSymbol(DataAddr, "ADRPAGE");
+
+  // ADR computes the page: point it at the data symbol so the converted
+  // ADRP produces page(Anchor) and the load adds the low-12 offset.
+  BC.MIB->setOperandToSymbolRef(const_cast<MCInst &>(*It), /*OpNum*/ 1, Anchor,
+                                /*Addend*/ 0, BC.Ctx.get(),
+                                ELF::R_AARCH64_ADR_PREL_PG_HI21);
+  // LDR: resolve the unsigned-offset immediate through the same symbol.
+  BC.MIB->setOperandToSymbolRef(const_cast<MCInst &>(Load), /*OpNum*/ 2, Anchor,
+                                /*Addend*/ 0, BC.Ctx.get(),
+                                ELF::R_AARCH64_LDST64_ABS_LO12_NC);
+}
 
 void ADRRelaxationPass::runOnFunction(BinaryFunction &BF) {
   if (PassFailed)
@@ -64,6 +137,20 @@ void ADRRelaxationPass::runOnFunction(BinaryFunction &BF) {
         const int64_t Addend = BC.MIB->getTargetAddend(Inst);
         const BinaryData *BD = BC.getBinaryDataByName(Symbol->getName());
         if (BD && ((BD->getAddress() + (uint64_t)Addend) & 0xfff) == 0) {
+          // GNU ld may relax an ADRP+LDR(GOT) pair into ADR+LDR. The
+          // relaxed ADR computes the old page address, and the paired
+          // load's offset can reach into the section that follows the
+          // page's section (e.g. the page lands at the tail of
+          // .data.rel.ro while the loaded word lives in .got). When
+          // -rewrite moves the sections apart, remapping the ADR target
+          // through the page's section produces a wrong address. Re-anchor
+          // the pair to a symbol at the actually loaded address so both
+          // instructions are resolved through the containing section.
+          // The re-anchor retargets the pair with ADRP page/LO12 offset
+          // relocation semantics, so it is only valid together with the
+          // conversion below.
+          reanchorCrossSectionPair(BC, BB, It, BD,
+                                   BD->getAddress() + (uint64_t)Addend);
           BC.MIB->convertADRToADRP(Inst);
           continue;
         }

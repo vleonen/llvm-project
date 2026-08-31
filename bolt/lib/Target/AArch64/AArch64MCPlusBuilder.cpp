@@ -1336,6 +1336,30 @@ public:
     return true;
   }
 
+  unsigned getMemScale(const MCInst &Inst) const override {
+    switch (Inst.getOpcode()) {
+    default:
+      return 0;
+    case AArch64::LDRBBui:
+    case AArch64::LDRSBXui:
+    case AArch64::LDRSBWui:
+      return 1;
+    case AArch64::LDRHHui:
+    case AArch64::LDRSHXui:
+    case AArch64::LDRSHWui:
+      return 2;
+    case AArch64::LDRSui:
+    case AArch64::LDRWui:
+    case AArch64::LDRSWui:
+      return 4;
+    case AArch64::LDRDui:
+    case AArch64::LDRXui:
+      return 8;
+    case AArch64::LDRQui:
+      return 16;
+    }
+  }
+
   bool createUncondBranch(MCInst &Inst, const MCSymbol *TBB,
                           MCContext *Ctx) const override {
     Inst.setOpcode(AArch64::B);
