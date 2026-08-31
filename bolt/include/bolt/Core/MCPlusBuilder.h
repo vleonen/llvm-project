@@ -1073,6 +1073,16 @@ public:
     return false;
   }
 
+  /// Convert an ADR instruction into an ADRP instruction on AArch64,
+  /// keeping the operand (symbol reference or immediate) intact. The
+  /// conversion is only value-identical when the address the instruction
+  /// computes is page-aligned: ADR then yields exactly the page that ADRP
+  /// produces, while gaining the +/-4GB range of ADRP over the +/-1MB
+  /// range of ADR. The caller is responsible for verifying the alignment
+  /// of the computed target address (symbol address + addend) before
+  /// calling. Returns true on conversion.
+  virtual bool convertADRToADRP(MCInst &Inst) const { return false; }
+
   // Replace Register in Inst with Imm. Returns true if successful
   virtual bool replaceRegWithImm(MCInst &Inst, unsigned Register,
                                  int64_t Imm) const {

@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bolt/Passes/ADRRelaxationPass.h"
+#include "bolt/Core/BinaryData.h"
 #include "bolt/Core/ParallelUtilities.h"
 #include "bolt/Utils/CommandLineOpts.h"
 #include <iterator>
@@ -49,6 +50,24 @@ void ADRRelaxationPass::runOnFunction(BinaryFunction &BF) {
       const MCSymbol *Symbol = BC.MIB->getTargetSymbol(Inst);
       if (!Symbol)
         continue;
+
+      // The linker (e.g. GNU ld with default --relax) may rewrite an ADRP
+      // into an ADR while --emit-relocs keeps the original relocations;
+      // such ADRs compute a page-aligned address (the page the original
+      // ADRP produced). After BOLT relocates the function, the target may
+      // be out of the +/-1MB ADR range, and growing the instruction is
+      // impossible in non-simple functions. Converting the ADR back to
+      // ADRP when its computed address (symbol address + addend) is
+      // page-aligned is value-identical, needs no extra space and removes
+      // the range restriction.
+      if (BC.isAArch64()) {
+        const int64_t Addend = BC.MIB->getTargetAddend(Inst);
+        const BinaryData *BD = BC.getBinaryDataByName(Symbol->getName());
+        if (BD && ((BD->getAddress() + (uint64_t)Addend) & 0xfff) == 0) {
+          BC.MIB->convertADRToADRP(Inst);
+          continue;
+        }
+      }
 
       if (BF.hasIslandsInfo()) {
         BinaryFunction::IslandInfo &Islands = BF.getIslandInfo();
