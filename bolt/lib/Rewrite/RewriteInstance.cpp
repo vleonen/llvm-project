@@ -7101,6 +7101,68 @@ void RewriteInstance::rewriteFile() {
 
   raw_fd_ostream &OS = Out->os();
 
+  // True for input data sections whose file image is restored from
+  // original contents in -rewrite mode (see the restore loop below).
+  // Shared with the R_*_RELATIVE static-byte mirror so both use identical
+  // exclusions: sections that BOLT intentionally patches post-emit are
+  // not restored and must not be mirrored.
+  auto IsRestoredDataSection = [this](const BinarySection &Section) {
+    static const char *const PatchedSections[] = {
+        ".dynamic",    ".got",        ".got.plt", ".eh_frame_hdr",
+        ".rela.dyn",   ".rela.plt",   ".rel.dyn", ".rel.plt",
+        ".init_array", ".fini_array", ".dynsym",
+    };
+    if (Section.isText() || Section.isVirtual() || Section.isLinkOnly())
+      return false;
+    if (!Section.hasSectionRef())
+      return false;
+    if (!Section.isFinalized() || !Section.getOutputFileOffset())
+      return false;
+    if (Section.getOutputName().starts_with(getOrgSecPrefix()) ||
+        Section.getOutputName().starts_with(getNewSecPrefix()))
+      return false;
+    for (const char *Patched : PatchedSections)
+      if (Section.getOutputName() == Patched)
+        return false;
+    return true;
+  };
+
+  // Resolve a symbol to its post-rewrite address: JITLink symbol table
+  // first, then the moved BinaryData output address (the same resolution
+  // order as writeRelocations).  Unlike getNewValueForSymbol, the
+  // fallback never yields a stale input address for moved data.
+  auto ResolveSymbolOutputValue = [this](const MCSymbol *Symbol) -> uint64_t {
+    if (std::optional<BOLTLinker::SymbolInfo> SI =
+            Linker->lookupSymbolInfo(Symbol->getName()))
+      return SI->Address;
+    if (BinaryData *BD = BC->getBinaryDataByName(Symbol->getName()))
+      return BD->isMoved() ? BD->getOutputAddress() : BD->getAddress();
+    return 0;
+  };
+
+  // Resolve a dynamic relocation to the value the dynamic linker applies
+  // at load time, mirroring the addend computation in
+  // patchELFAllocatableRelaSections.
+  auto ResolveDynamicRelocationValue =
+      [this, &ResolveSymbolOutputValue](const BinarySection &Section,
+                                        const Relocation &Rel) -> uint64_t {
+    uint64_t Value = Rel.Addend;
+    if (Rel.Symbol) {
+      // Internal-symbol folding for R_*_RELATIVE entries: resolve the
+      // symbol to its output address and add it to the addend.
+      Value += ResolveSymbolOutputValue(Rel.Symbol);
+    } else {
+      // End-of-section relocation first, then address remapping - the
+      // same resolution order as writeRelocations.
+      uint64_t Address = Section.getNewEndSymbolValue(Rel.Offset);
+      if (!Address)
+        Address = getNewFunctionOrDataAddress(Rel.Addend);
+      if (Address)
+        Value = Address;
+    }
+    return Value;
+  };
+
   if (opts::Rewrite) {
     // In rewrite mode, do not byte-copy the input allocatable region.
     // Write the ELF header (64 bytes) from the input, then seek past the
@@ -7391,28 +7453,8 @@ void RewriteInstance::rewriteFile() {
   // re-apply relocations, so JITLink-resolved values must be preserved.
   // Exclude sections that are intentionally patched by BOLT post-emit code.
   if (opts::Rewrite && !BC->IsStaticExecutable) {
-    auto IsPatchedSection = [&](StringRef Name) {
-      static const char *const PatchedSections[] = {
-          ".dynamic",    ".got",        ".got.plt", ".eh_frame_hdr",
-          ".rela.dyn",   ".rela.plt",   ".rel.dyn", ".rel.plt",
-          ".init_array", ".fini_array", ".dynsym",
-      };
-      for (const char *Patched : PatchedSections)
-        if (Name == Patched)
-          return true;
-      return false;
-    };
     for (BinarySection &Section : BC->allocatableSections()) {
-      if (Section.isText() || Section.isVirtual() || Section.isLinkOnly())
-        continue;
-      if (!Section.hasSectionRef())
-        continue;
-      if (!Section.isFinalized() || !Section.getOutputFileOffset())
-        continue;
-      if (Section.getOutputName().starts_with(getOrgSecPrefix()) ||
-          Section.getOutputName().starts_with(getNewSecPrefix()))
-        continue;
-      if (IsPatchedSection(Section.getOutputName()))
+      if (!IsRestoredDataSection(Section))
         continue;
       StringRef Contents = Section.getContents();
       uint64_t WriteSize =
@@ -7541,17 +7583,59 @@ void RewriteInstance::rewriteFile() {
   for (BinarySection &Section : BC->allocatableSections()) {
     if (opts::Rewrite && Section.isText())
       continue;
+
+    // Mirror R_*_RELATIVE dynamic relocations into the static bytes of
+    // restored sections. The content restore above leaves the original
+    // (stale) values in the file image, communicating the post-rewrite
+    // layout only through .rela.dyn addends - legal for RELA (the loader
+    // ignores the section bytes), but it breaks non-relocation-aware
+    // tools reading the file image (e.g. the Go toolchain's moduledata
+    // reader). Writing the loader-applied value into the static bytes is
+    // a load-time no-op and restores the linker-canonical static ==
+    // addend form.
+    if (opts::Rewrite && !BC->IsStaticExecutable &&
+        IsRestoredDataSection(Section)) {
+      const unsigned Psize = BC->AsmInfo->getCodePointerSize();
+      for (const Relocation &Rel : Section.dynamicRelocations()) {
+        if (!Rel.isRelative())
+          continue;
+        if (Rel.Offset + Psize > Section.getOutputSize())
+          continue;
+        Section.addPendingRelocation(Relocation{
+            Rel.Offset, /*Symbol=*/nullptr,
+            static_cast<uint32_t>(Relocation::getAbs(Psize)),
+            ResolveDynamicRelocationValue(Section, Rel), /*Value=*/0});
+      }
+    }
+
     Section.flushPendingRelocations(
         OS,
-        [this](const MCSymbol *S) {
-          return getNewValueForSymbol(S->getName());
-        },
-        [&](const Relocation &R) {
+        // Resolve pending-relocation symbols with the strong resolution
+        // (JITLink first, moved-BinaryData output address second): the
+        // value-match SkipReloc rule below compares against the same
+        // resolution, so the written value always equals the verified
+        // value. The weak getNewValueForSymbol fallback (stale input
+        // address for moved data) would diverge from the loader-applied
+        // value and the mirror would be skipped.
+        ResolveSymbolOutputValue, [&](const Relocation &R) {
           // In rewrite mode, skip offsets covered by dynamic relocations:
           // BOLT has already updated their addends and the dynamic linker
           // re-applies them at load time (same rule as the saved data
-          // relocations block above).
-          return opts::Rewrite && Section.getDynamicRelocationAt(R.Offset);
+          // relocations block above).  Exception: a pending relocation
+          // whose value exactly mirrors the loader-applied value is
+          // flushed - for RELA the loader ignores the static bytes, so
+          // writing the identical value is a load-time no-op that keeps
+          // the file image readable for non-relocation-aware tools
+          // (e.g. the Golang moduledata consumed by go tool objdump).
+          if (!opts::Rewrite)
+            return false;
+          const Relocation *Dyn = Section.getDynamicRelocationAt(R.Offset);
+          if (!Dyn)
+            return false;
+          uint64_t PendingValue = R.Addend;
+          if (R.Symbol)
+            PendingValue += ResolveSymbolOutputValue(R.Symbol);
+          return ResolveDynamicRelocationValue(Section, *Dyn) != PendingValue;
         });
   }
 
