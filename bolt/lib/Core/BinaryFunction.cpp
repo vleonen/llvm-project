@@ -1940,6 +1940,14 @@ bool BinaryFunction::validateInternalBranches() {
     if (!Offset || (Offset > getSize()))
       continue;
 
+    // A label created for a relocation from a data section is a data
+    // reference, not a control-flow target. Such a reference may point
+    // inside an instruction (e.g. an address-taken interior pointer), and
+    // -rewrite mode preserves the intra-function offset when remapping the
+    // address. Do not reject the function for it.
+    if (InternalRefDataOffsets.count(Offset))
+      continue;
+
     if (!getInstructionAtOffset(Offset) ||
         isInConstantIsland(getAddress() + Offset)) {
       BC.errs() << "BOLT-WARNING: corrupted control flow detected in function "

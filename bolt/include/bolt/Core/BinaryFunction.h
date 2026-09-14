@@ -296,6 +296,13 @@ private:
   /// instead of pointers.
   DenseSet<uint64_t> InternalRefDataRelocations;
 
+  /// Function offsets referenced by relocations from data sections. Unlike
+  /// jump-table destinations, these are plain data references and are not
+  /// required to point at an instruction boundary (e.g. an address-taken
+  /// interior pointer). Tracked separately so that validateInternalBranches()
+  /// does not mistake them for branch/call targets.
+  DenseSet<uint64_t> InternalRefDataOffsets;
+
   /// Offsets of indirect branches with unknown destinations.
   std::set<uint64_t> UnknownIndirectBranchOffsets;
 
@@ -667,6 +674,7 @@ private:
     assert(FuncOffset != 0 && "Relocation should reference function internals");
     registerReferencedOffset(FuncOffset);
     InternalRefDataRelocations.insert(RelOffset);
+    InternalRefDataOffsets.insert(FuncOffset);
     const MCSymbol *ReferencedSymbol =
         getOrCreateLocalLabel(getAddress() + FuncOffset);
 
