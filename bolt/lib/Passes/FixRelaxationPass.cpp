@@ -329,19 +329,14 @@ void FixRelaxations::runOnFunction(BinaryFunction &BF) {
   // ("unretargetable __BOLT_got_zero") or silently resolved to stale
   // addresses (rewritten binaries loading from old-page + new-offset).
   //
-  // The sweep retargets each orphan to a GOTENT symbol placed at the
-  // reference's own old address inside the .got (addend 0, exactly like the
-  // paired references above), relying on two facts:
-  //  * A load/store's addend is its slot's offset within the old GOT page;
-  //    because the layout preserves the .got page phase and the .got spans
-  //    at most two pages, the offset alone determines the old slot address
-  //    (>= phase: first page; < phase: second page).
-  //  * An ADRP's addend is the old GOT page address itself; the symbol
-  //    placed at page + phase (the corresponding position inside .got)
-  //    relocates to the same page in the output.
-  // Both mappings need the address to fall inside the old .got range;
-  // anything else (no .got, .got larger than two pages, degenerate zero
-  // addends) is left to the runOnFunctions check, which fails loudly.
+  // .got is moved as one section with its original page phase preserved.
+  // ADRP needs the exact input page, but a LO12 relocation only needs the
+  // address modulo 4096. Thus any in-section representative with the same
+  // low 12 bits is sufficient for a load/store, even when several GOT slots
+  // have that offset. The base register still selects the actual page.
+  // Do not restrict this to small GOTs: ambiguity about the full slot address
+  // does not imply ambiguity about the bits encoded by a LO12 relocation.
+  // Reject references whose page/offset has no representative in .got.
   if (!opts::Rewrite)
     return;
   ErrorOr<BinarySection &> GOTSection = BC.getUniqueSectionByName(".got");
@@ -351,7 +346,7 @@ void FixRelaxations::runOnFunction(BinaryFunction &BF) {
   const uint64_t GOTSize = GOTSection->getSize();
   const uint64_t GOTStartPage = GOTStart & ~0xfffull;
   const uint64_t Phase = GOTStart & 0xfffull;
-  if (!GOTStart || GOTSize > 0x2000 - Phase)
+  if (!GOTStart || !GOTSize)
     return;
 
   const auto inGOT = [GOTStart, GOTSize](uint64_t Addr) {
@@ -372,22 +367,23 @@ void FixRelaxations::runOnFunction(BinaryFunction &BF) {
       const int64_t Addend = BC.MIB->getTargetAddend(Inst, RefOp);
       if (IsAdrp && !Addend)
         continue; // ADRP addend is the old page address; 0 is not a page.
-      // Resolve the reference's own old address inside .got.
+      // Find an in-section representative for the bits this operand encodes.
       uint64_t OldAddr;
       if (IsAdrp) {
-        // Addend = old page address. Any in-.got address on that page
-        // works (PG_HI21 keeps only the page): prefer page + phase, fall
-        // back to the page start (partial last page) or .got start (first
-        // page, where the page start may precede the section).
-        OldAddr = Addend + Phase;
-        if (!inGOT(OldAddr))
-          OldAddr = Addend;
-        if (!inGOT(OldAddr))
-          OldAddr = GOTStart;
-        if (!inGOT(OldAddr))
+        // ADRP must keep its exact page. Never substitute the first GOT
+        // page for an address outside the section.
+        const uint64_t Page = static_cast<uint64_t>(Addend);
+        if ((Page & 0xfff) || Page < GOTStartPage ||
+            Page > ((GOTStart + GOTSize - 1) & ~0xfffull))
           continue;
+        OldAddr = std::max(Page, GOTStart);
       } else {
-        // Addend = slot offset within the old page; unwrap the phase.
+        // Choose an in-section address congruent to this LO12 operand.
+        // It need not be the actual slot: LDST64_ABS_LO12_NC encodes only
+        // these low bits, and the retargeted base provides the correct page.
+        if ((!BC.MIB->mayLoad(Inst) && !BC.MIB->mayStore(Inst)) ||
+            Addend < 0 || Addend >= 0x1000)
+          continue;
         OldAddr = (static_cast<uint64_t>(Addend) >= Phase)
                       ? GOTStartPage + Addend
                       : GOTStartPage + 0x1000 + Addend;
