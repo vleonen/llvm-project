@@ -697,17 +697,34 @@ bool BinaryContext::analyzeJumpTable(const uint64_t Address,
         break;
       }
       if (Type == JumpTable::JTT_NORMAL && !getRelocationAt(EntryAddress)) {
-        LLVM_DEBUG(
-            dbgs()
-            << "FAIL: JTT_NORMAL table, no relocation for this address\n");
-        break;
+        // The absence of a static relocation is fine when the entry has a
+        // dynamic relative relocation (PIE binaries store the target address
+        // of an absolute table entry in the relocation addend while its file
+        // contents are zero), or when there is no relocation at all (non-PIE
+        // binaries keep real absolute addresses in the table). In the latter
+        // case the entry is validated using its raw contents below.
+        const Relocation *DynRel = getDynamicRelocationAt(EntryAddress);
+        if (DynRel && !DynRel->isRelative()) {
+          LLVM_DEBUG(dbgs() << "FAIL: JTT_NORMAL table, non-relative dynamic "
+                               "relocation for this address\n");
+          break;
+        }
       }
     }
 
-    const uint64_t Value =
-        (Type == JumpTable::JTT_PIC)
-            ? Address + *getSignedValueAtAddress(EntryAddress, EntrySize)
-            : *getPointerAtAddress(EntryAddress);
+    uint64_t Value;
+    if (Type == JumpTable::JTT_PIC) {
+      Value = Address + *getSignedValueAtAddress(EntryAddress, EntrySize);
+    } else {
+      Value = *getPointerAtAddress(EntryAddress);
+      // Absolute entries of PIE binaries may be zero in the file, with the
+      // actual address stored in the addend of a dynamic relative relocation
+      // (e.g. label address tables used by computed gotos).
+      if (const Relocation *DynRel = getDynamicRelocationAt(EntryAddress))
+        if (DynRel->isRelative() &&
+            (!Value || !getBinaryFunctionContainingAddress(Value)))
+          Value = DynRel->Addend;
+    }
 
     // __builtin_unreachable() case.
     if (Value == UnreachableAddress) {

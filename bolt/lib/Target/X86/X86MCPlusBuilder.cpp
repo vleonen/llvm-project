@@ -2099,14 +2099,59 @@ public:
     if (!MO)
       return IndirectBranchType::UNKNOWN;
 
+    // The segment register may be set to DS by a "notrack" prefix (0x3e)
+    // on indirect branches, e.g. on jump table jumps emitted with CET
+    // support. The prefix has no effect on the memory address and can be
+    // safely ignored.
+    if (MO->SegRegNum != X86::NoRegister && MO->SegRegNum != X86::DS)
+      return IndirectBranchType::UNKNOWN;
+
+    // The jump table address could be pre-materialized into a register with
+    // a RIP-relative LEA, e.g. by computed gotos that keep the table base in
+    // a register:
+    //
+    //   lea    JT(%rip), %base
+    //   ...
+    //   jmp *(%base, %index, 8)
+    //
+    // Find the nearest definition of the base register and, if it is a
+    // RIP-relative LEA, use its displacement as the address of the memory
+    // location.
+    if (MO->BaseRegNum != X86::NoRegister &&
+        MO->BaseRegNum != RIPRegister) {
+      bool FoundBaseDef = false;
+      for (auto PrevII = II; PrevII != IE; ++PrevII) {
+        MCInst &PrevInstr = *PrevII;
+        const MCInstrDesc &PrevInstrDesc = Info->get(PrevInstr.getOpcode());
+        if (!PrevInstrDesc.hasDefOfPhysReg(PrevInstr, MO->BaseRegNum,
+                                           *RegInfo))
+          continue;
+        if (isLEA64r(PrevInstr)) {
+          std::optional<X86MemOperand> BaseMO =
+              evaluateX86MemoryOperand(PrevInstr);
+          if (BaseMO && BaseMO->BaseRegNum == RIPRegister &&
+              BaseMO->IndexRegNum == X86::NoRegister &&
+              BaseMO->SegRegNum == X86::NoRegister && BaseMO->DispExpr) {
+            MO->DispExpr = BaseMO->DispExpr;
+            MO->DispImm = MO->DispImm + BaseMO->DispImm;
+            FoundBaseDef = true;
+          }
+        }
+        break;
+      }
+      if (!FoundBaseDef)
+        return IndirectBranchType::UNKNOWN;
+      // Note: the base register is reported to the caller untouched (via
+      // BaseRegNumOut) so that the jump table handling can repoint the
+      // defining LEA at the jump table label; the emitted indirect branch
+      // keeps addressing the table through the base register, which stays
+      // valid in PIE binaries.
+    }
+
     BaseRegNumOut = MO->BaseRegNum;
     IndexRegNumOut = MO->IndexRegNum;
     DispValueOut = MO->DispImm;
     DispExprOut = MO->DispExpr;
-
-    if ((MO->BaseRegNum != X86::NoRegister && MO->BaseRegNum != RIPRegister) ||
-        MO->SegRegNum != X86::NoRegister)
-      return IndirectBranchType::UNKNOWN;
 
     if (MemLocInstr == &Instruction &&
         (!MO->ScaleImm || MO->IndexRegNum == X86::NoRegister)) {

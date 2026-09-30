@@ -851,6 +851,12 @@ BinaryFunction::processIndirectBranch(MCInst &Instruction, unsigned Size,
   if (BranchType == IndirectBranchType::UNKNOWN && !MemLocInstr)
     return BranchType;
 
+  // A general-purpose base register of the memory operand means the memory
+  // location address was pre-materialized into the register with a LEA
+  // (detected by analyzeIndirectBranch). Remember it before it gets reset
+  // while processing the displacement.
+  const unsigned MemOperandBaseReg = BaseRegNum;
+
   if (MemLocInstr != &Instruction)
     IndexRegNum = BC.MIB->getNoRegister();
 
@@ -1021,7 +1027,30 @@ BinaryFunction::processIndirectBranch(MCInst &Instruction, unsigned Size,
 
   // Convert the instruction into jump table branch.
   const MCSymbol *JTLabel = BC.getOrCreateJumpTable(*this, ArrayStart, JTType);
-  BC.MIB->replaceMemOperandDisp(*MemLocInstr, JTLabel, BC.Ctx.get());
+  if (MemOperandBaseReg != BC.MIB->getNoRegister() &&
+      MemOperandBaseReg != BC.MRI->getProgramCounter()) {
+    // The table base is held in a register defined by a RIP-relative LEA
+    // (e.g. a computed-goto dispatch). Rewrite the LEA to reference the
+    // jump table label instead of the memory operand of the branch, which
+    // keeps addressing the table through the base register.
+    MCInst *LEADef = nullptr;
+    auto II = Instructions.find(Offset);
+    while (II != Instructions.begin()) {
+      --II;
+      MCInst &Inst = II->second;
+      if (!BC.MII->get(Inst.getOpcode())
+               .hasDefOfPhysReg(Inst, MemOperandBaseReg, *BC.MRI))
+        continue;
+      if (BC.MIB->isLEA64r(Inst))
+        LEADef = &Inst;
+      break;
+    }
+    if (!LEADef)
+      return IndirectBranchType::UNKNOWN;
+    BC.MIB->replaceMemOperandDisp(*LEADef, JTLabel, BC.Ctx.get());
+  } else {
+    BC.MIB->replaceMemOperandDisp(*MemLocInstr, JTLabel, BC.Ctx.get());
+  }
   BC.MIB->setJumpTable(Instruction, ArrayStart, IndexRegNum);
 
   JTSites.emplace_back(Offset, ArrayStart);

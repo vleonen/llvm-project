@@ -784,7 +784,12 @@ void BinaryEmitter::emitJumpTables(const BinaryFunction &BF) {
       continue;
     if (opts::PrintJumpTables)
       JT.print(BC.outs());
-    if (opts::JumpTables == JTS_BASIC) {
+    // Absolute-entry (JTT_NORMAL) jump tables must not be re-emitted into a
+    // new section in PIE binaries or shared objects: the re-emitted entries
+    // would need dynamic relocations that are not generated. Keep such
+    // tables in place and update the original entries instead.
+    if (opts::JumpTables == JTS_BASIC ||
+        (JT.Type == JumpTable::JTT_NORMAL && !BC.HasFixedLoadAddress)) {
       JT.updateOriginal();
     } else {
       MCSection *HotSection, *ColdSection;
