@@ -591,6 +591,11 @@ public:
     return Analysis->isCall(Inst) || isTailCall(Inst);
   }
 
+  /// Return true if the instruction is an indirect call through memory
+  /// (e.g. x86 call *mem). Used to handle linker-relaxed GOTPCRELX calls
+  /// that were converted from PC-relative to absolute form.
+  virtual bool isCall64m(const MCInst &Inst) const { return false; }
+
   virtual bool isReturn(const MCInst &Inst) const {
     return Analysis->isReturn(Inst);
   }
@@ -1791,6 +1796,17 @@ public:
                                    uint64_t BeginPC) const {
     llvm_unreachable("not implemented");
     return 0;
+  }
+
+  /// Replace immediate values in PLT entry instructions with relocatable
+  /// symbol references. \p PLTSymbol is the symbol at the GOT entry
+  /// address that the PLT entry references. Returns true if all expected
+  /// instructions (ADRP, ADD/LDR) were patched.
+  virtual bool handlePLTEntry(InstructionIterator Begin,
+                              InstructionIterator End,
+                              const MCSymbol *PLTSymbol, MCContext *Ctx) {
+    llvm_unreachable("not implemented");
+    return false;
   }
 
   virtual void patchPLTEntryForBTI(BinaryFunction &PLTFunction, MCInst &Call) {

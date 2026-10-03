@@ -71,8 +71,9 @@ BinarySection::hash(const BinaryData &BD,
   return Hash;
 }
 
-void BinarySection::emitAsData(MCStreamer &Streamer,
-                               const Twine &SectionName) const {
+void BinarySection::emitAsData(
+    MCStreamer &Streamer, const Twine &SectionName,
+    ArrayRef<std::pair<uint64_t, MCSymbol *>> Labels) const {
   StringRef SectionContents =
       isFinalized() ? getOutputContents() : getContents();
   MCSectionELF *ELFSection =
@@ -88,19 +89,41 @@ void BinarySection::emitAsData(MCStreamer &Streamer,
                     << (isAllocatable() ? "" : "non-")
                     << "allocatable data section " << SectionName << '\n');
 
+  // Emit the section bytes and labels up to \p Offset, interleaved so that
+  // each label is emitted when the cursor reaches its offset (and therefore
+  // binds to the correct position). Labels beyond the section contents only
+  // emit their label.
+  uint64_t SectionOffset = 0;
+  size_t LabelIdx = 0;
+  auto emitUpTo = [&](uint64_t Offset) {
+    while (LabelIdx < Labels.size() && Labels[LabelIdx].first <= Offset) {
+      const uint64_t LabelOffset = Labels[LabelIdx].first;
+      if (LabelOffset > SectionOffset) {
+        Streamer.emitBytes(SectionContents.substr(
+            SectionOffset,
+            std::min(LabelOffset, (uint64_t)SectionContents.size()) -
+                SectionOffset));
+        SectionOffset = LabelOffset;
+      }
+      Streamer.emitLabel(Labels[LabelIdx].second);
+      ++LabelIdx;
+    }
+    const uint64_t ByteEnd =
+        std::min(Offset, (uint64_t)SectionContents.size());
+    if (SectionOffset < ByteEnd) {
+      Streamer.emitBytes(SectionContents.substr(SectionOffset,
+                                                ByteEnd - SectionOffset));
+      SectionOffset = ByteEnd;
+    }
+  };
+
   if (!hasRelocations()) {
-    Streamer.emitBytes(SectionContents);
+    emitUpTo(SectionContents.size());
   } else {
-    uint64_t SectionOffset = 0;
     for (auto RI = Relocations.begin(), RE = Relocations.end(); RI != RE;) {
       auto RelocationOffset = RI->Offset;
       assert(RelocationOffset < SectionContents.size() && "overflow detected");
-
-      if (SectionOffset < RelocationOffset) {
-        Streamer.emitBytes(SectionContents.substr(
-            SectionOffset, RelocationOffset - SectionOffset));
-        SectionOffset = RelocationOffset;
-      }
+      emitUpTo(RelocationOffset);
 
       // Get iterators to all relocations with the same offset. Usually, there
       // is only one such relocation but there can be more for composed
@@ -136,9 +159,15 @@ void BinarySection::emitAsData(MCStreamer &Streamer,
       size_t RelocationSize = Relocation::emit(ROI, ROE, &Streamer);
       SectionOffset += RelocationSize;
     }
+    emitUpTo(SectionContents.size());
     assert(SectionOffset <= SectionContents.size() && "overflow error");
-    if (SectionOffset < SectionContents.size())
-      Streamer.emitBytes(SectionContents.substr(SectionOffset));
+  }
+
+  // Labels at or beyond the section contents (e.g. end markers) emit
+  // without trailing bytes.
+  while (LabelIdx < Labels.size()) {
+    Streamer.emitLabel(Labels[LabelIdx].second);
+    ++LabelIdx;
   }
 
   if (BC.HasRelocations && opts::HotData && isReordered())

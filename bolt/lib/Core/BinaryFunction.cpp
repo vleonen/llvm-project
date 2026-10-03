@@ -1515,6 +1515,21 @@ Error BinaryFunction::disassemble() {
                   })) {
             return Error(std::move(NewE));
           }
+        } else if (opts::Rewrite && BC.isX86() &&
+                   BC.MIB->isCall64m(Instruction)) {
+          // Linker-relaxed GOTPCRELX converted a PC-relative call *GOT(%rip)
+          // into an absolute call *imm. The relocation is still recorded, so
+          // replace the immediate with the symbol reference to keep it
+          // resolvable by JITLink after sections move.
+          if (const Relocation *Rel =
+                  getRelocationInRange(Offset, Offset + Size)) {
+            int64_t Value = Rel->Value;
+            bool Ok = BC.MIB->replaceImmWithSymbolRef(Instruction, Rel->Symbol,
+                                                      Rel->Addend, Ctx.get(),
+                                                      Value, Rel->Type);
+            assert(Ok && "Failed to replace immediate with symbol ref!");
+            (void)Ok;
+          }
         }
 
         if (BC.isAArch64())
@@ -4510,6 +4525,48 @@ void BinaryFunction::calculateLoopInfo() {
       }
     }
   }
+}
+
+bool BinaryFunction::disassemblePLT(InstructionListType &Instructions) {
+  if (Instructions.empty())
+    return false;
+
+  BC.SymbolicDisAsm->setSymbolizer(BC.MIB->createTargetSymbolizer(*this));
+  Labels[0] = BC.Ctx->createNamedTempSymbol("BB0");
+
+  LLVM_DEBUG(dbgs() << "BOLT-DEBUG: disassemblePLT for " << getPrintName()
+                    << " with " << Instructions.size() << " instructions\n";
+
+             for (auto &Inst : Instructions) {
+               BC.InstPrinter->printInst(&Inst, 0, "", *BC.STI, dbgs());
+               dbgs() << "\n";
+             });
+
+  bool Handled = BC.MIB->handlePLTEntry(
+      Instructions.begin(), Instructions.end(), getPLTSymbol(), BC.Ctx.get());
+  LLVM_DEBUG(dbgs() << "BOLT-DEBUG:   handlePLTEntry returned " << Handled
+                    << "\n");
+  if (!Handled) {
+    if (opts::Verbosity)
+      errs() << "BOLT-WARNING: can't handle PLT entry in function "
+             << getPrintName() << " for entry " << getPLTSymbol() << "\n";
+    BC.SymbolicDisAsm->setSymbolizer(nullptr);
+    return false;
+  }
+
+  // Add instructions to the Instructions map. buildCFG (called later
+  // by buildFunctionsCFG) creates basic blocks from this map.
+  updateState(State::Disassembled);
+  uint64_t Offset = 0;
+  for (MCInst &Inst : Instructions) {
+    // Compute the size before moving the instruction out.
+    uint64_t Size = BC.MIB->getSize(Inst).value_or(4);
+    addInstruction(Offset, std::move(Inst));
+    Offset += Size;
+  }
+
+  BC.SymbolicDisAsm->setSymbolizer(nullptr);
+  return true;
 }
 
 void BinaryFunction::updateOutputValues(const BOLTLinker &Linker) {
