@@ -184,7 +184,8 @@ uint64_t BinarySection::write(raw_ostream &OS) const {
 }
 
 void BinarySection::flushPendingRelocations(raw_fd_ostream &OS,
-                                            SymbolResolverFuncTy Resolver) {
+                                            SymbolResolverFuncTy Resolver,
+                                            SkipRelocationFuncTy SkipReloc) {
   if (PendingRelocations.empty() && Patches.empty())
     return;
 
@@ -209,6 +210,8 @@ void BinarySection::flushPendingRelocations(raw_fd_ostream &OS,
 
   uint64_t SkippedPendingRelocations = 0;
   for (Relocation &Reloc : PendingRelocations) {
+    if (SkipReloc && SkipReloc(Reloc))
+      continue;
     uint64_t Value = Reloc.Addend;
     if (Reloc.Symbol)
       Value += Resolver(Reloc.Symbol);

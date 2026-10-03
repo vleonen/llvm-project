@@ -131,6 +131,7 @@ struct ProgramHeader {
             p_vaddr + p_memsz);
   }
 
+  bool isTLS() const { return p_type == ELF::PT_TLS; }
   bool isLOAD() const { return p_type == ELF::PT_LOAD; }
   bool isExec() const { return p_flags & ELF::PF_X; }
 
