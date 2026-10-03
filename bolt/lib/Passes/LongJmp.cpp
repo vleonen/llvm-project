@@ -37,11 +37,6 @@ static cl::opt<bool> GroupStubs("group-stubs",
                                 cl::desc("share stubs across functions"),
                                 cl::init(true), cl::cat(BoltOptCategory));
 
-static cl::opt<bool>
-    ExperimentalRelaxation("relax-exp",
-                           cl::desc("run experimental relaxation pass"),
-                           cl::init(false), cl::cat(BoltOptCategory));
-
 static cl::opt<unsigned long long> MaxClusterSize(
     "max-cluster-size",
     cl::desc("maximum estimated size of a function fragment cluster in bytes"),

@@ -376,6 +376,11 @@ cl::opt<bool> Rewrite(
     cl::desc("relocate all sections in the binary in-place (experimental)"),
     cl::Hidden, cl::cat(BoltCategory));
 
+cl::opt<bool> ExperimentalRelaxation(
+    "relax-exp",
+    cl::desc("run experimental relaxation pass"),
+    cl::init(false), cl::cat(BoltOptCategory));
+
 cl::opt<bool> KeepSectionOrder(
     "keep-section-order",
     cl::desc("in -rewrite mode, preserve the original binary's section "

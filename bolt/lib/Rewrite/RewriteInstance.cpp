@@ -71,7 +71,7 @@
 #include <optional>
 #include <system_error>
 
-#undef  DEBUG_TYPE
+#undef DEBUG_TYPE
 #define DEBUG_TYPE "bolt"
 
 using namespace llvm;
@@ -170,10 +170,9 @@ ForceFunctionNames("funcs",
   cl::cat(BoltCategory));
 
 static cl::opt<std::string>
-FunctionNamesFile("funcs-file",
-  cl::desc("file with list of functions to optimize"),
-  cl::Hidden,
-  cl::cat(BoltCategory));
+    FunctionNamesFile("funcs-file",
+                      cl::desc("file with list of functions to optimize"),
+                      cl::Hidden, cl::cat(BoltCategory));
 
 static cl::list<std::string> ForceFunctionNamesNR(
     "funcs-no-regex", cl::CommaSeparated,
@@ -185,11 +184,8 @@ static cl::opt<std::string> FunctionNamesFileNR(
     cl::desc("file with list of functions to optimize (non-regex)"), cl::Hidden,
     cl::cat(BoltCategory));
 
-cl::opt<bool>
-KeepTmp("keep-tmp",
-  cl::desc("preserve intermediate .o file"),
-  cl::Hidden,
-  cl::cat(BoltCategory));
+cl::opt<bool> KeepTmp("keep-tmp", cl::desc("preserve intermediate .o file"),
+                      cl::Hidden, cl::cat(BoltCategory));
 
 static cl::opt<unsigned>
 LiteThresholdPct("lite-threshold-pct",
@@ -252,19 +248,14 @@ static cl::opt<cl::boolOrDefault> RelocationMode(
 
 extern cl::opt<std::string> SaveProfile;
 
-static cl::list<std::string>
-SkipFunctionNames("skip-funcs",
-  cl::CommaSeparated,
-  cl::desc("list of functions to skip"),
-  cl::value_desc("func1,func2,func3,..."),
-  cl::Hidden,
-  cl::cat(BoltCategory));
+static cl::list<std::string> SkipFunctionNames(
+    "skip-funcs", cl::CommaSeparated, cl::desc("list of functions to skip"),
+    cl::value_desc("func1,func2,func3,..."), cl::Hidden, cl::cat(BoltCategory));
 
 static cl::opt<std::string>
-SkipFunctionNamesFile("skip-funcs-file",
-  cl::desc("file with list of functions to skip"),
-  cl::Hidden,
-  cl::cat(BoltCategory));
+    SkipFunctionNamesFile("skip-funcs-file",
+                          cl::desc("file with list of functions to skip"),
+                          cl::Hidden, cl::cat(BoltCategory));
 
 static cl::opt<bool> TrapOldCode(
     "trap-old-code",
@@ -297,10 +288,9 @@ static cl::opt<uint64_t> CustomAllocationVMA(
     cl::Hidden, cl::cat(BoltCategory));
 
 static cl::opt<bool>
-SequentialDisassembly("sequential-disassembly",
-  cl::desc("performs disassembly sequentially"),
-  cl::init(false),
-  cl::cat(BoltOptCategory));
+    SequentialDisassembly("sequential-disassembly",
+                          cl::desc("performs disassembly sequentially"),
+                          cl::init(false), cl::cat(BoltOptCategory));
 
 static cl::opt<bool> WriteBoltInfoSection(
     "bolt-info", cl::desc("write bolt info section in the output binary"),
@@ -2900,6 +2890,15 @@ void RewriteInstance::adjustCommandLineOptions() {
       BC->errs() << "BOLT-ERROR: -rewrite is only supported on AArch64 and X86\n";
       exit(1);
     }
+    if (opts::MergeTextSections) {
+      BC->errs() << "BOLT-ERROR: -rewrite is incompatible with "
+                    "--merge-text-sections\n";
+      exit(1);
+    }
+    if (opts::ExperimentalRelaxation) {
+      BC->errs() << "BOLT-ERROR: -rewrite is incompatible with --relax-exp\n";
+      exit(1);
+    }
     if (opts::Lite) {
       BC->errs() << "BOLT-WARNING: -rewrite overrides -lite "
                     "(all functions must be emitted in -rewrite mode)\n";
@@ -4914,14 +4913,14 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
       });
     } else if (Phdr.isExec()) {
       // Default: PLT-first sorting for exec segments only.
-      llvm::stable_sort(Sections, [&isPLTSection](BinarySection *A,
-                                                  BinarySection *B) {
-        bool AIsPLT = isPLTSection(A->getOutputName());
-        bool BIsPLT = isPLTSection(B->getOutputName());
-        if (AIsPLT != BIsPLT)
-          return AIsPLT;                          // PLT sections come first
-        return A->getAddress() < B->getAddress(); // Stable by original address
-      });
+      llvm::stable_sort(Sections,
+                        [&isPLTSection](BinarySection *A, BinarySection *B) {
+                          bool AIsPLT = isPLTSection(A->getOutputName());
+                          bool BIsPLT = isPLTSection(B->getOutputName());
+                          if (AIsPLT != BIsPLT)
+                            return AIsPLT;
+                          return A->getAddress() < B->getAddress();
+                        });
     }
 
     // Map file-backed sections.
@@ -5090,6 +5089,37 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
       BC->OutputSegments.emplace_back(Phdr.p_type, Phdr.p_flags, 0, 0, 0, 0, 0,
                                       Phdr.p_align);
       continue;
+    }
+
+    if (Phdr.p_type == ELF::PT_GNU_RELRO) {
+      // Rebuild PT_GNU_RELRO over the full output span of its contained
+      // sections. A single first-match descriptor (like the generic loop
+      // below) would shrink the write-protected region to one section,
+      // silently dropping RELRO hardening for the rest (e.g. .got,
+      // .got.plt and .data.rel.ro are commonly covered by one input
+      // PT_GNU_RELRO).
+      uint64_t Start = std::numeric_limits<uint64_t>::max();
+      uint64_t End = 0;
+      uint64_t StartOffset = 0;
+      for (BinarySection &Section : BC->allocatableSections()) {
+        if (!Phdr.contains(Section) || !Section.getOutputAddress())
+          continue;
+        const uint64_t Size =
+            Section.isVirtual() ? Section.getSize() : Section.getOutputSize();
+        if (Section.getOutputAddress() < Start) {
+          Start = Section.getOutputAddress();
+          StartOffset = Section.getOutputFileOffset();
+        }
+        End = std::max(End, Section.getOutputAddress() + Size);
+      }
+      if (End) {
+        BC->OutputSegments.emplace_back(Phdr.p_type, Phdr.p_flags, StartOffset,
+                                        Start, Start, End - Start, End - Start,
+                                        Phdr.p_align);
+        continue;
+      }
+      // No contained section was placed; fall through to the generic loop
+      // to keep a descriptor (matching the input) in the output.
     }
 
     // For other non-LOAD segments (PT_INTERP, PT_GNU_EH_FRAME, etc.),
@@ -5444,13 +5474,9 @@ void RewriteInstance::mapCodeSectionsInPlace(
     const unsigned Flags = BinarySection::getFlags(/*IsReadOnly=*/true,
                                                    /*IsText=*/true,
                                                    /*IsAllocatable=*/true);
-    BinarySection &Section =
-      BC->registerOrUpdateSection(getBOLTTextSectionName(),
-                                  ELF::SHT_PROGBITS,
-                                  Flags,
-                                  /*Data=*/nullptr,
-                                  NewTextSectionSize,
-                                  16);
+    BinarySection &Section = BC->registerOrUpdateSection(
+        getBOLTTextSectionName(), ELF::SHT_PROGBITS, Flags,
+        /*Data=*/nullptr, NewTextSectionSize, 16);
     Section.setOutputAddress(NewTextSectionStartAddress);
     Section.setOutputFileOffset(
         getFileOffsetForAddress(NewTextSectionStartAddress));
@@ -5803,7 +5829,7 @@ uint64_t appendPadding(raw_pwrite_stream &OS, uint64_t Offset,
   return Offset + PaddingSize;
 }
 
-}
+} // namespace
 
 template <typename ELFT>
 static Expected<uint64_t>
@@ -6024,12 +6050,9 @@ void RewriteInstance::finalizeSectionStringTable(ELFObjectFile<ELFT> *File) {
   uint8_t *DataCopy = new uint8_t[SHStrTabSize];
   memset(DataCopy, 0, SHStrTabSize);
   SHStrTab.write(DataCopy);
-  BC->registerOrUpdateNoteSection(".shstrtab",
-                                  DataCopy,
-                                  SHStrTabSize,
+  BC->registerOrUpdateNoteSection(".shstrtab", DataCopy, SHStrTabSize,
                                   /*Alignment=*/1,
-                                  /*IsReadOnly=*/true,
-                                  ELF::SHT_STRTAB);
+                                  /*IsReadOnly=*/true, ELF::SHT_STRTAB);
 }
 
 void RewriteInstance::addBoltInfoSection() {
@@ -6341,11 +6364,9 @@ void RewriteInstance::patchELFSectionHeaderTable(ELFObjectFile<ELFT> *File) {
   std::vector<uint32_t> NewSectionIndex;
   std::vector<ELFShdrTy> OutputSections =
       getOutputSections(File, NewSectionIndex);
-  LLVM_DEBUG(
-    dbgs() << "BOLT-DEBUG: old to new section index mapping:\n";
-    for (uint64_t I = 0; I < NewSectionIndex.size(); ++I)
-      dbgs() << "  " << I << " -> " << NewSectionIndex[I] << '\n';
-  );
+  LLVM_DEBUG(dbgs() << "BOLT-DEBUG: old to new section index mapping:\n";
+             for (uint64_t I = 0; I < NewSectionIndex.size(); ++I) dbgs()
+             << "  " << I << " -> " << NewSectionIndex[I] << '\n';);
 
   // Align starting address for section header table. There's no architecutal
   // need to align this, it is just for pleasant human readability.
@@ -6953,9 +6974,7 @@ void RewriteInstance::patchELFSymTabs(ELFObjectFile<ELFT> *File) {
   NumLocalSymbols = 0;
   updateELFSymbolTable(
       File,
-      /*IsDynSym=*/false,
-      *SymTabSection,
-      NewSectionIndex,
+      /*IsDynSym=*/false, *SymTabSection, NewSectionIndex,
       [&](size_t Offset, const ELFSymTy &Sym) {
         if (Sym.getBinding() == ELF::STB_LOCAL)
           ++NumLocalSymbols;
@@ -6969,19 +6988,15 @@ void RewriteInstance::patchELFSymTabs(ELFObjectFile<ELFT> *File) {
         return Idx;
       });
 
-  BC->registerOrUpdateNoteSection(SecName,
-                                  copyByteArray(NewContents),
+  BC->registerOrUpdateNoteSection(SecName, copyByteArray(NewContents),
                                   NewContents.size(),
                                   /*Alignment=*/1,
-                                  /*IsReadOnly=*/true,
-                                  ELF::SHT_SYMTAB);
+                                  /*IsReadOnly=*/true, ELF::SHT_SYMTAB);
 
-  BC->registerOrUpdateNoteSection(StrSecName,
-                                  copyByteArray(NewStrTab),
+  BC->registerOrUpdateNoteSection(StrSecName, copyByteArray(NewStrTab),
                                   NewStrTab.size(),
                                   /*Alignment=*/1,
-                                  /*IsReadOnly=*/true,
-                                  ELF::SHT_STRTAB);
+                                  /*IsReadOnly=*/true, ELF::SHT_STRTAB);
 }
 
 template <typename ELFT>
@@ -7077,8 +7092,8 @@ void RewriteInstance::patchELFAllocatableRelrSection(
 }
 
 template <typename ELFT>
-void
-RewriteInstance::patchELFAllocatableRelaSections(ELFObjectFile<ELFT> *File) {
+void RewriteInstance::patchELFAllocatableRelaSections(
+    ELFObjectFile<ELFT> *File) {
   using Elf_Rela = typename ELFT::Rela;
   raw_fd_ostream &OS = Out->os();
   const ELFFile<ELFT> &EF = File->getELFFile();
@@ -7237,50 +7252,73 @@ template <typename ELFT>
 void RewriteInstance::patchELFGOT(ELFObjectFile<ELFT> *File) {
   raw_fd_ostream &OS = Out->os();
 
-  SectionRef GOTSection;
-  for (const SectionRef &Section : File->sections()) {
-    StringRef SectionName = cantFail(Section.getName());
-    if (SectionName == ".got") {
-      GOTSection = Section;
-      break;
+  auto patchSection = [&](StringRef SectionName, bool UseDataAddr) {
+    SectionRef TargetSection;
+    for (const SectionRef &Section : File->sections()) {
+      if (cantFail(Section.getName()) == SectionName) {
+        TargetSection = Section;
+        break;
+      }
     }
-  }
-  if (!GOTSection.getObject()) {
-    if (!BC->IsStaticExecutable)
-      BC->errs() << "BOLT-INFO: no .got section found\n";
-    return;
-  }
+    if (!TargetSection.getObject())
+      return;
 
-  // In -rewrite mode, the .got section is at a new output offset.
-  uint64_t GOTFileOffset = 0;
-  if (opts::Rewrite) {
-    BinarySection *GOTSec = BC->getSectionForSectionRef(GOTSection);
-    if (GOTSec && GOTSec->getOutputFileOffset())
-      GOTFileOffset = GOTSec->getOutputFileOffset();
-  }
+    uint64_t SecFileOffset = 0;
+    if (opts::Rewrite) {
+      BinarySection *BoltSec = BC->getSectionForSectionRef(TargetSection);
+      if (BoltSec && BoltSec->getOutputFileOffset())
+        SecFileOffset = BoltSec->getOutputFileOffset();
+    }
 
-  StringRef GOTContents = cantFail(GOTSection.getContents());
-  for (const uint64_t *GOTEntry =
-           reinterpret_cast<const uint64_t *>(GOTContents.data());
-       GOTEntry < reinterpret_cast<const uint64_t *>(GOTContents.data() +
-                                                     GOTContents.size());
-       ++GOTEntry) {
-    if (uint64_t NewAddress = getNewFunctionAddress(*GOTEntry)) {
-      LLVM_DEBUG(dbgs() << "BOLT-DEBUG: patching GOT entry 0x"
-                        << Twine::utohexstr(*GOTEntry) << " with 0x"
+    StringRef Contents = cantFail(TargetSection.getContents());
+    for (const uint64_t *Entry =
+             reinterpret_cast<const uint64_t *>(Contents.data());
+         Entry <
+         reinterpret_cast<const uint64_t *>(Contents.data() + Contents.size());
+         ++Entry) {
+      // In rewrite mode, .got entries may reference data (e.g. pointers to
+      // variables in statically linked binaries with no dynamic relocs).
+      // getNewFunctionAddress would return 0 for those, leaving stale input
+      // addresses in the output. Use getNewFunctionOrDataAddress whose
+      // rewrite-mode section-delta fallback can map any allocatable address.
+      const uint64_t NewAddress = (UseDataAddr || opts::Rewrite)
+                                      ? getNewFunctionOrDataAddress(*Entry)
+                                      : getNewFunctionAddress(*Entry);
+      if (!NewAddress || NewAddress == *Entry)
+        continue;
+      LLVM_DEBUG(dbgs() << "BOLT-DEBUG: patching " << SectionName << " entry 0x"
+                        << Twine::utohexstr(*Entry) << " with 0x"
                         << Twine::utohexstr(NewAddress) << '\n');
       uint64_t EntryOffset;
-      if (opts::Rewrite && GOTFileOffset)
-        EntryOffset =
-            GOTFileOffset +
-            (reinterpret_cast<const char *>(GOTEntry) - GOTContents.data());
+      if (opts::Rewrite && SecFileOffset)
+        EntryOffset = SecFileOffset +
+                      (reinterpret_cast<const char *>(Entry) - Contents.data());
       else
         EntryOffset =
-            reinterpret_cast<const char *>(GOTEntry) - File->getData().data();
+            reinterpret_cast<const char *>(Entry) - File->getData().data();
       safePWrite(OS, reinterpret_cast<const char *>(&NewAddress),
                  sizeof(NewAddress), EntryOffset);
     }
-  }
+  };
+
+  // Preserve the upstream diagnostic for a missing .got section.
+  auto hasSection = [&](StringRef SectionName) {
+    for (const SectionRef &Section : File->sections())
+      if (cantFail(Section.getName()) == SectionName)
+        return true;
+    return false;
+  };
+  if (!hasSection(".got") && !BC->IsStaticExecutable)
+    BC->outs() << "BOLT-INFO: no .got section found\n";
+
+  // In rewrite mode .got entries are resolved through
+  // getNewFunctionOrDataAddress even when they reference functions, so that
+  // data pointers (no dynamic relocations, statically resolved by the
+  // linker) are mapped via the section-delta fallback instead of being
+  // skipped and left with stale input addresses.
+  patchSection(".got", /*UseDataAddr=*/opts::Rewrite);
+  if (!BC->IsStaticExecutable)
+    patchSection(".got.plt", /*UseDataAddr=*/true);
 }
 
 template <typename ELFT>
@@ -7870,11 +7908,13 @@ void RewriteInstance::rewriteFile() {
     if (opts::Rewrite && Section.getOutputFileOffset() == 0)
       continue;
     if (opts::Rewrite && !Section.isText() && !Section.isVirtual() &&
-        Section.hasSectionRef()) {
+        Section.hasSectionRef() && !BC->IsStaticExecutable) {
       // In rewrite mode, write original input content for data sections.
       // The MCStreamer/JITLink pipeline may corrupt non-relocated entries.
       // The dynamic linker applies RELATIVE relocations from .rela.dyn at
       // load time, so the file content only matters for non-relocated fields.
+      // Skip this for static executables — they have no dynamic linker,
+      // so JITLink-resolved relocation values must be preserved.
       OS.seek(Section.getOutputFileOffset());
       StringRef Contents = Section.getContents();
       uint64_t WriteSize =
@@ -7987,8 +8027,10 @@ void RewriteInstance::rewriteFile() {
   // non-relocated entries in data sections. The dynamic linker applies
   // RELATIVE relocations from .rela.dyn at load time, so the file content
   // only matters for non-relocated fields.
+  // Skip this for static executables — they have no dynamic linker to
+  // re-apply relocations, so JITLink-resolved values must be preserved.
   // Exclude sections that are intentionally patched by BOLT post-emit code.
-  if (opts::Rewrite) {
+  if (opts::Rewrite && !BC->IsStaticExecutable) {
     auto IsPatchedSection = [&](StringRef Name) {
       static const char *const PatchedSections[] = {
           ".dynamic",    ".got",        ".got.plt", ".eh_frame_hdr",
