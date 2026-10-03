@@ -23,6 +23,9 @@
 # Check that the binary runs and dispatches to the right label (exit code 0).
 # RUN: %t.pie
 # RUN: %t.pie.bolt
+# Check the -rewrite mode output as well.
+# RUN: llvm-bolt %t.pie -o %t.pie.rewrite -reorder-blocks=ext-tsp -rewrite 2>&1 | FileCheck %s
+# RUN: %t.pie.rewrite
 
 # Check that dynamic relocations against the label table were preserved.
 # RUN: llvm-readelf -rW %t.pie.bolt | FileCheck --check-prefix=CHECK-RELOCS %s
@@ -35,6 +38,8 @@
 # RUN: llvm-bolt %t.nopie -o %t.nopie.bolt -reorder-blocks=ext-tsp 2>&1 | FileCheck %s
 # RUN: %t.nopie
 # RUN: %t.nopie.bolt
+# RUN: llvm-bolt %t.nopie -o %t.nopie.rewrite -reorder-blocks=ext-tsp -rewrite 2>&1 | FileCheck %s
+# RUN: %t.nopie.rewrite
 
   .text
   .globl _start

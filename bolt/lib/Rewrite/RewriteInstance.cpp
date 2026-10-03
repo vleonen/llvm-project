@@ -2065,11 +2065,16 @@ BinaryFunction *RewriteInstance::createPLTBinaryFunction(uint64_t TargetAddress,
     return nullptr;
   }
 
-  if (!BF)
-    BF = BC->createBinaryFunction(Symbol->getName().str() + "@PLT", *Section,
-                                  EntryAddress, 0, EntrySize,
+  if (!BF) {
+    std::string BFName = Symbol->getName().str() + "@PLT";
+    // Distinguish the .plt lazy stub from the .plt.sec entry of the same
+    // import: both reference the same GOT slot but are separate functions.
+    for (unsigned Suffix = 0; BC->getBinaryFunctionByName(BFName); ++Suffix)
+      BFName = Symbol->getName().str() + "@PLT.stub" +
+               (Suffix ? std::to_string(Suffix) : std::string());
+    BF = BC->createBinaryFunction(BFName, *Section, EntryAddress, 0, EntrySize,
                                   Section->getAlignment());
-  else
+  } else
     BF->addAlternativeName(Symbol->getName().str() + "@PLT");
   setPLTSymbol(BF, Symbol->getName());
 
@@ -2248,9 +2253,48 @@ void RewriteInstance::disassemblePLTSectionX86(BinarySection &Section,
       if (opts::Rewrite) {
         BC->MIB->setSize(Instruction, InstrSize);
         Instructions.emplace_back(Instruction);
+        // The bytes after the direct "jmp PLT0" tail of a lazy stub are
+        // padding; collecting them would create an unreachable basic
+        // block and invalidate the CFG.
+        if (BC->MIB->isUnconditionalBranch(Instruction))
+          break;
       }
 
       InstrOffset += InstrSize;
+    }
+
+    // CET-style lazy stubs (endbr64; push $Idx; jmp PLT0) contain no
+    // indirect branch, so no GOT reference was evaluated above. Recover
+    // the GOT slot address from the pushed relocation index (the .got.plt
+    // layout is 3 reserved entries followed by one slot per .rela.plt
+    // entry) so the stub is registered and emitted for lazy binding.
+    if (!TargetAddress && opts::Rewrite && EntryOffset > 0 &&
+        !Instructions.empty()) {
+      std::optional<uint64_t> PushedIndex;
+      for (const MCInst &Inst : Instructions) {
+        if (BC->MIB->isPush(Inst) && Inst.getNumOperands() > 0 &&
+            Inst.getOperand(0).isImm()) {
+          PushedIndex = Inst.getOperand(0).getImm();
+          break;
+        }
+      }
+      if (PushedIndex) {
+        // The 3 reserved GOT entries + the lazy JUMP_SLOT slots live in
+        // .got.plt for linkers that emit a separate PLT GOT (e.g. lld), but
+        // bfd merges them into a single .got section (partial RELRO). Fall
+        // back to .got when there is no dedicated .got.plt.
+        ErrorOr<BinarySection &> GotPlt =
+            BC->getUniqueSectionByName(".got.plt");
+        if (!GotPlt)
+          GotPlt = BC->getUniqueSectionByName(".got");
+        if (GotPlt) {
+          const unsigned PtrSize = BC->AsmInfo->getCodePointerSize();
+          const uint64_t Slot =
+              GotPlt->getAddress() + 3 * PtrSize + PtrSize * *PushedIndex;
+          if (BC->getDynamicRelocationAt(Slot))
+            TargetAddress = Slot;
+        }
+      }
     }
 
     if (!TargetAddress)
@@ -2262,6 +2306,32 @@ void RewriteInstance::disassemblePLTSectionX86(BinarySection &Section,
 
     BinaryFunction *BF = createPLTBinaryFunction(
         TargetAddress, SectionAddress + EntryOffset, EntrySize);
+
+    // Pre-symbolize the pc-relative references of the entry so that every
+    // reference (GOT slot loads, the "jmp PLT0" tail branch) binds to the
+    // symbol at its own target address and the emitter re-encodes it
+    // against the new section layout. The single symbol later passed to
+    // handlePLTEntry cannot distinguish the two GOT slots referenced by
+    // the PLT0 header. Run after createPLTBinaryFunction so that symbols
+    // registered for GOT slots (e.g. "free@GOT") are reused.
+    if (opts::Rewrite && BF && !Instructions.empty()) {
+      uint64_t Offset = 0;
+      for (MCInst &Inst : Instructions) {
+        const uint64_t Size = BC->MIB->getSize(Inst).value_or(0);
+        BC->MIB->symbolizePLTRefs(Inst, SectionAddress + EntryOffset + Offset,
+                                  Size, BC->Ctx.get(), [this](uint64_t Addr) {
+                                    return BC->getOrCreateGlobalSymbol(
+                                        Addr, "DATAat");
+                                  });
+        // A direct branch converted to a symbolic target outside the entry
+        // (e.g. the "jmp PLT0" tail) is a tail call: mark it so that CFG
+        // validation accepts the entry function.
+        if (BC->MIB->isBranch(Inst) && !BC->MIB->isIndirectBranch(Inst) &&
+            BC->MIB->getTargetSymbol(Inst))
+          BC->MIB->convertJmpToTailCall(Inst);
+        Offset += Size;
+      }
+    }
 
     // In rewrite mode, disassemble the entry body so it can be emitted as a
     // function with retargeted GOT references (handlePLTEntry).
@@ -4846,11 +4916,8 @@ void RewriteInstance::mapLoadableSegmentsRewrite(
         continue;
       if (MappedSections.count(&Section))
         continue;
-      // Skip BOLT-internal sections (renamed originals with OrgSecPrefix).
-      // Use getOutputName() because ExecutableFileMemoryManager renames
-      // originals via setOutputName(), which changes OutputName but not
-      // the internal Name.
-      if (Section.getOutputName().starts_with(getOrgSecPrefix()))
+      // Skip BOLT-internal sections fully replaced by regenerated output.
+      if (isFullyReplacedOriginal(Section))
         continue;
       // Determine if this is an original section (has an input address) or
       // a new BOLT-created section. Original sections are matched to this
@@ -6267,10 +6334,11 @@ RewriteInstance::getOutputSections(ELFObjectFile<ELFT> *File,
     if (BinSec->isAnonymous())
       continue;
 
-    // In -rewrite mode, exclude BOLT-internal sections (renamed originals
-    // with OrgSecPrefix) from the section header table. Use getOutputName()
-    // because setOutputName() only changes the output name.
-    if (opts::Rewrite && BinSec->getOutputName().starts_with(getOrgSecPrefix()))
+    // In -rewrite mode, exclude BOLT-internal sections fully replaced by
+    // regenerated output from the section header table; renamed originals
+    // that still hold original content (e.g. .rodata strings) keep their
+    // header.
+    if (opts::Rewrite && isFullyReplacedOriginal(*BinSec))
       continue;
 
     addSection(Section, *BinSec);
@@ -7380,14 +7448,29 @@ void RewriteInstance::patchELFGOT(ELFObjectFile<ELFT> *File) {
          Entry <
          reinterpret_cast<const uint64_t *>(Contents.data() + Contents.size());
          ++Entry) {
+      // Lazy .got.plt entries contain addresses inside PLT entries (e.g.
+      // of the "push" instruction that triggers lazy resolution). Map
+      // them through the PLT BinaryFunction so that the intra-entry
+      // offset is preserved and the entry lands in the re-emitted .plt.
+      // The generic section-delta fallback below cannot be used here: it
+      // would map through the original .plt section, which is renamed and
+      // not emitted in -rewrite mode.
+      uint64_t NewAddress = 0;
+      if (SectionName == ".got.plt" && opts::Rewrite) {
+        if (const BinaryFunction *BF =
+                BC->getBinaryFunctionContainingAddress(*Entry))
+          if (BF->isPLTFunction() && BF->getOutputAddress())
+            NewAddress = BF->getOutputAddress() + (*Entry - BF->getAddress());
+      }
       // In rewrite mode, .got entries may reference data (e.g. pointers to
       // variables in statically linked binaries with no dynamic relocs).
       // getNewFunctionAddress would return 0 for those, leaving stale input
       // addresses in the output. Use getNewFunctionOrDataAddress whose
       // rewrite-mode section-delta fallback can map any allocatable address.
-      const uint64_t NewAddress = (UseDataAddr || opts::Rewrite)
-                                      ? getNewFunctionOrDataAddress(*Entry)
-                                      : getNewFunctionAddress(*Entry);
+      if (!NewAddress)
+        NewAddress = (UseDataAddr || opts::Rewrite)
+                         ? getNewFunctionOrDataAddress(*Entry)
+                         : getNewFunctionAddress(*Entry);
       if (!NewAddress || NewAddress == *Entry)
         continue;
       LLVM_DEBUG(dbgs() << "BOLT-DEBUG: patching " << SectionName << " entry 0x"
@@ -7678,7 +7761,7 @@ Error RewriteInstance::readELFDynamic(ELFObjectFile<ELFT> *File) {
 }
 
 uint64_t RewriteInstance::getNewFunctionAddress(uint64_t OldAddress) {
-  const BinaryFunction *Function = BC->getBinaryFunctionAtAddress(OldAddress);
+  BinaryFunction *Function = BC->getBinaryFunctionAtAddress(OldAddress);
   if (!Function)
     return 0;
 
@@ -7687,12 +7770,43 @@ uint64_t RewriteInstance::getNewFunctionAddress(uint64_t OldAddress) {
   if (Function->isFolded())
     Function = Function->getFoldedIntoFunction();
 
-  return Function->getOutputAddress();
+  // The lookup may resolve through a symbol registered at \p OldAddress
+  // inside a function body (e.g. a pointer into the middle of a
+  // function). Preserve the intra-function offset when mapping to the
+  // new function address; it is zero for exact entry addresses.
+  // ICF folding may resolve the lookup through a symbol of a folded
+  // function to the folding survivor; the delta below would then be an
+  // arbitrary inter-function distance, so return the survivor's entry
+  // address instead (the pre-existing behavior for folded symbols).
+  if (!Function->containsAddress(OldAddress))
+    return Function->getOutputAddress();
+  return Function->getOutputAddress() + (OldAddress - Function->getAddress());
 }
 
 uint64_t RewriteInstance::getNewFunctionOrDataAddress(uint64_t OldAddress) {
   if (uint64_t Function = getNewFunctionAddress(OldAddress))
     return Function;
+
+  // An address inside a regular function body with no symbol registered
+  // at it (e.g. a static pointer to func+offset) maps to the same offset
+  // from the function's new address. PLT entries are excluded: linker
+  // relocations reference them with tagged addends (e.g. PLT32 addend+1)
+  // whose offset must not be preserved.
+  if (const BinaryFunction *BF =
+          BC->getBinaryFunctionContainingAddress(OldAddress))
+    if (BF->getOutputAddress() && !BF->isPLTFunction()) {
+      if (BF->isEmitted()) {
+        // The layout of an emitted function may have changed (e.g. by block
+        // reordering). Map interior addresses - such as label address
+        // entries of computed-goto tables in .rodata - through the
+        // function's address translation instead of preserving the old
+        // intra-function offset.
+        if (uint64_t NewAddress = BF->translateInputToOutputAddress(
+                OldAddress))
+          return NewAddress;
+      }
+      return BF->getOutputAddress() + (OldAddress - BF->getAddress());
+    }
 
   const BinaryData *BD = BC->getBinaryDataAtAddress(OldAddress);
   if (BD && BD->isMoved())
@@ -7908,6 +8022,66 @@ void RewriteInstance::rewriteFile() {
 
   raw_fd_ostream &OS = Out->os();
 
+  // True for input data sections whose file image is restored from
+  // original contents in -rewrite mode (see the restore loop below).
+  // Shared with the R_*_RELATIVE static-byte mirror so both use identical
+  // exclusions: sections that BOLT intentionally patches post-emit are
+  // not restored and must not be mirrored.
+  auto IsRestoredDataSection = [this](const BinarySection &Section) {
+    static const char *const PatchedSections[] = {
+        ".dynamic",    ".got",        ".got.plt", ".eh_frame_hdr",
+        ".rela.dyn",   ".rela.plt",   ".rel.dyn", ".rel.plt",
+        ".init_array", ".fini_array", ".dynsym",
+    };
+    if (Section.isText() || Section.isVirtual() || Section.isLinkOnly())
+      return false;
+    if (!Section.hasSectionRef())
+      return false;
+    if (!Section.isFinalized() || !Section.getOutputFileOffset())
+      return false;
+    if (Section.getOutputName().starts_with(getOrgSecPrefix()) ||
+        Section.getOutputName().starts_with(getNewSecPrefix()))
+      return false;
+    for (const char *Patched : PatchedSections)
+      if (Section.getOutputName() == Patched)
+        return false;
+    return true;
+  };
+
+  // Resolve a symbol to its post-rewrite address: JITLink symbol table
+  // first, then the moved BinaryData output address (the same resolution
+  // order as writeRelocations).  Unlike getNewValueForSymbol, the
+  // fallback never yields a stale input address for moved data.
+  auto ResolveSymbolOutputValue = [this](const MCSymbol *Symbol) -> uint64_t {
+    if (std::optional<BOLTLinker::SymbolInfo> SI =
+            Linker->lookupSymbolInfo(Symbol->getName()))
+      return SI->Address;
+    if (BinaryData *BD = BC->getBinaryDataByName(Symbol->getName()))
+      return BD->isMoved() ? BD->getOutputAddress() : BD->getAddress();
+    return 0;
+  };
+
+  // Resolve a dynamic relocation to the value the dynamic linker applies
+  // at load time, mirroring the addend computation in
+  // patchELFAllocatableRelaSections.
+  auto ResolveDynamicRelocationValue =
+      [this, &ResolveSymbolOutputValue](const Relocation &Rel) -> uint64_t {
+    uint64_t Value = Rel.Addend;
+    if (Rel.Symbol) {
+      // Internal-symbol folding for R_*_RELATIVE entries: resolve the
+      // symbol to its output address and add it to the addend.
+      Value += ResolveSymbolOutputValue(Rel.Symbol);
+    } else {
+      // Address remapping, matching patchELFAllocatableRelaSections (which
+      // has no end-of-section fallback): the mirrored static value stays
+      // identical to the loader-applied addend.
+      uint64_t Address = getNewFunctionOrDataAddress(Rel.Addend);
+      if (Address)
+        Value = Address;
+    }
+    return Value;
+  };
+
   if (opts::Rewrite) {
     // In rewrite mode, do not byte-copy the input allocatable region.
     // Write the ELF header (64 bytes) from the input, then seek past the
@@ -7976,13 +8150,14 @@ void RewriteInstance::rewriteFile() {
       continue;
     }
 
-    // In -rewrite mode, skip all BOLT-internal sections (renamed originals
-    // with OrgSecPrefix and new sections with NewSecPrefix). Original text
-    // is replaced by emitFunctions(); original data sections are emitted
-    // via emitDataSections under clean names. Use getOutputName() because
-    // setOutputName() only changes OutputName, not the internal Name.
+    // In -rewrite mode, skip BOLT-internal sections that are fully replaced
+    // by regenerated output (renamed originals such as .bolt.org.text and
+    // any leftover new sections with NewSecPrefix). Renamed originals that
+    // still hold original content (e.g. .bolt.org.rodata - its string
+    // literals are not re-emitted) are written below like other data
+    // sections.
     if (opts::Rewrite &&
-        (Section.getOutputName().starts_with(getOrgSecPrefix()) ||
+        (isFullyReplacedOriginal(Section) ||
          Section.getOutputName().starts_with(getNewSecPrefix()))) {
       LLVM_DEBUG(dbgs() << "BOLT-DEBUG: skipping BOLT-internal section "
                         << Section.getOutputName() << " in rewrite mode\n");
@@ -8110,28 +8285,8 @@ void RewriteInstance::rewriteFile() {
   // re-apply relocations, so JITLink-resolved values must be preserved.
   // Exclude sections that are intentionally patched by BOLT post-emit code.
   if (opts::Rewrite && !BC->IsStaticExecutable) {
-    auto IsPatchedSection = [&](StringRef Name) {
-      static const char *const PatchedSections[] = {
-          ".dynamic",    ".got",        ".got.plt", ".eh_frame_hdr",
-          ".rela.dyn",   ".rela.plt",   ".rel.dyn", ".rel.plt",
-          ".init_array", ".fini_array", ".dynsym",
-      };
-      for (const char *Patched : PatchedSections)
-        if (Name == Patched)
-          return true;
-      return false;
-    };
     for (BinarySection &Section : BC->allocatableSections()) {
-      if (Section.isText() || Section.isVirtual() || Section.isLinkOnly())
-        continue;
-      if (!Section.hasSectionRef())
-        continue;
-      if (!Section.isFinalized() || !Section.getOutputFileOffset())
-        continue;
-      if (Section.getOutputName().starts_with(getOrgSecPrefix()) ||
-          Section.getOutputName().starts_with(getNewSecPrefix()))
-        continue;
-      if (IsPatchedSection(Section.getOutputName()))
+      if (!IsRestoredDataSection(Section))
         continue;
       StringRef Contents = Section.getContents();
       uint64_t WriteSize =
@@ -8260,17 +8415,59 @@ void RewriteInstance::rewriteFile() {
   for (BinarySection &Section : BC->allocatableSections()) {
     if (opts::Rewrite && Section.isText())
       continue;
+
+    // Mirror R_*_RELATIVE dynamic relocations into the static bytes of
+    // restored sections. The content restore above leaves the original
+    // (stale) values in the file image, communicating the post-rewrite
+    // layout only through .rela.dyn addends - legal for RELA (the loader
+    // ignores the section bytes), but it breaks non-relocation-aware
+    // tools reading the file image (e.g. the Go toolchain's moduledata
+    // reader). Writing the loader-applied value into the static bytes is
+    // a load-time no-op and restores the linker-canonical static ==
+    // addend form.
+    if (opts::Rewrite && !BC->IsStaticExecutable &&
+        IsRestoredDataSection(Section)) {
+      const unsigned Psize = BC->AsmInfo->getCodePointerSize();
+      for (const Relocation &Rel : Section.dynamicRelocations()) {
+        if (!Rel.isRelative())
+          continue;
+        if (Rel.Offset + Psize > Section.getOutputSize())
+          continue;
+        Section.addPendingRelocation(
+            Relocation{Rel.Offset, /*Symbol=*/nullptr,
+                       static_cast<uint32_t>(Relocation::getAbs64()),
+                       ResolveDynamicRelocationValue(Rel), /*Value=*/0});
+      }
+    }
+
     Section.flushPendingRelocations(
         OS,
-        [this](const MCSymbol *S) {
-          return getNewValueForSymbol(S->getName());
-        },
-        [&](const Relocation &R) {
+        // Resolve pending-relocation symbols with the strong resolution
+        // (JITLink first, moved-BinaryData output address second): the
+        // value-match SkipReloc rule below compares against the same
+        // resolution, so the written value always equals the verified
+        // value. The weak getNewValueForSymbol fallback (stale input
+        // address for moved data) would diverge from the loader-applied
+        // value and the mirror would be skipped.
+        ResolveSymbolOutputValue, [&](const Relocation &R) {
           // In rewrite mode, skip offsets covered by dynamic relocations:
           // BOLT has already updated their addends and the dynamic linker
           // re-applies them at load time (same rule as the saved data
-          // relocations block above).
-          return opts::Rewrite && Section.getDynamicRelocationAt(R.Offset);
+          // relocations block above).  Exception: a pending relocation
+          // whose value exactly mirrors the loader-applied value is
+          // flushed - for RELA the loader ignores the static bytes, so
+          // writing the identical value is a load-time no-op that keeps
+          // the file image readable for non-relocation-aware tools
+          // (e.g. the Golang moduledata consumed by go tool objdump).
+          if (!opts::Rewrite)
+            return false;
+          const Relocation *Dyn = Section.getDynamicRelocationAt(R.Offset);
+          if (!Dyn)
+            return false;
+          uint64_t PendingValue = R.Addend;
+          if (R.Symbol)
+            PendingValue += ResolveSymbolOutputValue(R.Symbol);
+          return ResolveDynamicRelocationValue(*Dyn) != PendingValue;
         });
   }
 

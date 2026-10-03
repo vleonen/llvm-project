@@ -226,6 +226,20 @@ private:
   /// Map all sections to their final addresses.
   void mapFileSections(BOLTLinker::SectionMapper MapSection);
 
+  /// In -rewrite mode, return true for renamed original sections whose
+  /// content is fully replaced by regenerated output (the original code
+  /// section and .eh_frame). Other renamed originals (e.g. .rodata, which
+  /// only receives new jump tables while its original contents, such as
+  /// string literals, are not re-emitted) must be kept in the output.
+  /// Uses the output name because ExecutableFileMemoryManager renames
+  /// originals via setOutputName(), which changes OutputName but not the
+  /// internal Name.
+  bool isFullyReplacedOriginal(const BinarySection &Section) const {
+    return Section.getOutputName().starts_with(getOrgSecPrefix()) &&
+           (Section.isText() ||
+            Section.getName() == getEHFrameSectionName());
+  }
+
   /// In -rewrite mode, assign new addresses to all allocatable sections by
   /// iterating input program segments and repacking sections into them.
   void mapLoadableSegmentsRewrite(BOLTLinker::SectionMapper MapSection);
