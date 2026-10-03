@@ -15,6 +15,7 @@
 
 #include "bolt/Core/BinaryContext.h"
 #include "bolt/Core/Linker.h"
+#include "bolt/Core/Relocation.h"
 #include "bolt/Rewrite/MetadataManager.h"
 #include "bolt/Utils/NameResolver.h"
 #include "llvm/MC/StringTableBuilder.h"
@@ -160,6 +161,11 @@ private:
 
   /// Mark functions that are not meant for processing as ignored.
   void selectFunctionsToProcess();
+
+  /// Reject the binary in -rewrite mode if any function occupying code in the
+  /// main code section will not be emitted, i.e. its code would be lost when
+  /// the section is replaced.
+  void verifyMovableFunctions();
 
   /// Read information from debug sections.
   void readDebugInfo();
@@ -652,6 +658,9 @@ private:
   /// Number of processed to data relocations.  Used to implement the
   /// -max-relocations debugging option.
   uint64_t NumDataRelocations{0};
+
+  /// Saved data-section relocations for rewrite mode (cleared during emit).
+  std::vector<std::pair<std::string, Relocation>> SavedDataRelocations;
 
   /// Number of failed to process relocations.
   uint64_t NumFailedRelocations{0};
