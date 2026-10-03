@@ -122,6 +122,8 @@ extern llvm::cl::opt<ProfileFormatKind> ProfileFormat;
 extern llvm::cl::list<std::string> ReorderData;
 extern llvm::cl::opt<bool> ShowDensity;
 extern llvm::cl::opt<bool> SplitEH;
+extern llvm::cl::opt<bool> Rewrite;
+extern llvm::cl::opt<bool> KeepSectionOrder;
 extern llvm::cl::opt<bool> StrictMode;
 extern llvm::cl::opt<bool> TimeOpts;
 extern llvm::cl::opt<bool> UseOldText;

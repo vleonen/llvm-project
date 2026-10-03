@@ -143,12 +143,20 @@ void ExecutableFileMemoryManager::updateSection(
     // Update the original section contents.
     ErrorOr<BinarySection &> OrgSection =
         BC.getUniqueSectionByName(SectionName.substr(OrgSecPrefix.length()));
-    assert(OrgSection && OrgSection->isAllocatable() &&
-           "Original section must exist and be allocatable.");
-
-    Section = &OrgSection.get();
-    Section->updateContents(Contents, Size);
-  } else {
+    if (OrgSection && OrgSection->isAllocatable()) {
+      Section = &OrgSection.get();
+      Section->updateContents(Contents, Size);
+      // In -rewrite mode, the original section may have already been
+      // assigned a section ID by a prior JITLink section (e.g. the new
+      // .text from emitFunctions). Don't overwrite the ID in that case.
+      if (Section->hasValidSectionID())
+        return;
+    } else {
+      // Fall through to register as a new section.
+      Section = nullptr;
+    }
+  }
+  if (!Section) {
     // If the input contains a section with the section name, rename it in the
     // output file to avoid the section name conflict and emit the new section
     // under a unique internal name.
