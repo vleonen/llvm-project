@@ -2165,9 +2165,58 @@ void RewriteInstance::disassemblePLTSectionAArch64(BinarySection &Section) {
     createPLTBinaryFunction(TargetAddress, EntryAddress, EntrySize);
 
     if (opts::Rewrite) {
+      // The reserved TLSDESC resolver entry (DT_TLSDESC_PLT) saves x2/x3
+      // and loads through the DT_TLSDESC_GOT slot - a non-canonical pattern
+      // that analyzePLTEntry cannot parse, so createPLTBinaryFunction
+      // skipped it (null TargetAddress). Create it explicitly so that it
+      // is re-emitted into .plt; patchELFDynamic then retargets
+      // DT_TLSDESC_PLT to the new address (TLSDESC bindings that resolve
+      // lazily, e.g. under musl, jump through this entry). handlePLTEntry
+      // rewrites the entry's address computations as references to the PLT
+      // symbol: use the TLSDESC GOT slot so the references track the
+      // slot's new location.
+      BinaryFunction *ReservedBF = nullptr;
+      MCSymbol *TLSDescGOTSym = nullptr;
+      if (EntryAddress == TLSDescPLTAddress && EntrySize &&
+          TLSDescGOTAddress && !BC->getBinaryFunctionAtAddress(EntryAddress)) {
+        ReservedBF = BC->createBinaryFunction(
+            "__BOLT_PSEUDO_" + Section.getName().str() + ".tlsdesc", Section,
+            EntryAddress, 0, EntrySize, Section.getAlignment());
+        TLSDescGOTSym =
+            BC->getOrCreateGlobalSymbol(TLSDescGOTAddress, "DATAat");
+        ReservedBF->setPLTSymbol(TLSDescGOTSym);
+      }
+
       BinaryFunction *BF = BC->getBinaryFunctionAtAddress(EntryAddress);
-      if (BF && BF->disassemblePLT(Instructions))
+      if (BF && BF->disassemblePLT(Instructions)) {
         BF->setPseudo(false);
+        // handlePLTEntry binds every address computation to the PLT symbol
+        // with addend 0, i.e. to the GOT slot address S. bfd and gold emit
+        // the entry as: 0:stp 4:adrp x2 8:adrp x3 12:ldr x2 16:add x3 20:br.
+        // The x2 chain (resolver load) must resolve to S, but the x3 chain
+        // (resolver argument pointer) must resolve to S+8 - the
+        // descriptor's value word. Rebind both of x3's instructions to S+8
+        // so the materialized address is page(S+8) + lo12(S+8) = S+8 even
+        // when the word at S+8 crosses a page boundary. Guard on operand
+        // shapes (adrp: Rd + page imm; ADD: Rd, Rn, imm, shifter) so an
+        // unexpected layout keeps the slot+0 bindings instead of corrupting
+        // an unrelated instruction.
+        if (ReservedBF && TLSDescGOTSym) {
+          auto AdrpIt = BF->Instructions.find(8);
+          if (AdrpIt != BF->Instructions.end() &&
+              AdrpIt->second.getNumOperands() == 2)
+            BC->MIB->setOperandToSymbolRef(
+                AdrpIt->second, 1, TLSDescGOTSym, 8, BC->Ctx.get(),
+                ELF::R_AARCH64_ADR_PREL_PG_HI21);
+          auto AddIt = BF->Instructions.find(16);
+          if (AddIt != BF->Instructions.end() &&
+              AddIt->second.getNumOperands() == 4 &&
+              !AddIt->second.getOperand(2).isReg())
+            BC->MIB->setOperandToSymbolRef(
+                AddIt->second, 2, TLSDescGOTSym, 8, BC->Ctx.get(),
+                ELF::R_AARCH64_ADD_ABS_LO12_NC);
+        }
+      }
     }
   }
 }
@@ -7550,6 +7599,18 @@ void RewriteInstance::patchELFDynamic(ELFObjectFile<ELFT> *File) {
       RewriteDynamicOffset = DynSec->getOutputFileOffset();
   }
 
+  // Retarget an address-valued dynamic entry (d_ptr) to the new output
+  // address of the section covering the old address, preserving the
+  // intra-section offset. Leaves the entry unpatched when no registered
+  // section covers the address or the section did not move.
+  auto RetargetToOutputSection = [this](uint64_t OldAddr, uint64_t &NewAddr) {
+    ErrorOr<BinarySection &> Sec = BC->getSectionForAddress(OldAddr);
+    if (!Sec || !Sec->getOutputAddress())
+      return false;
+    NewAddr = Sec->getOutputAddress() + (OldAddr - Sec->getAddress());
+    return true;
+  };
+
   for (const Elf_Dyn &Dyn : DynamicEntries) {
     Elf_Dyn NewDE = Dyn;
     bool ShouldPatch = true;
@@ -7605,7 +7666,11 @@ void RewriteInstance::patchELFDynamic(ELFObjectFile<ELFT> *File) {
       }
       break;
     // In -rewrite mode, patch address-valued DT entries to point to the
-    // new output addresses of their owning sections.
+    // new output addresses of their owning sections. Entries holding sizes
+    // or counts (DT_RELRSZ, DT_VERDEFNUM, DT_INIT_ARRAYSZ, ...), string
+    // table offsets (DT_SONAME, DT_RUNPATH, ... - they stay valid because
+    // DT_STRTAB itself is patched), flags, and DT_DEBUG (owned by the
+    // dynamic linker) are not addresses and must not be patched here.
     case ELF::DT_INIT_ARRAY:
     case ELF::DT_FINI_ARRAY:
     case ELF::DT_GNU_HASH:
@@ -7616,18 +7681,33 @@ void RewriteInstance::patchELFDynamic(ELFObjectFile<ELFT> *File) {
     // NB: DT_RELRSZ is a size (d_val), not an address - do not patch it.
     case ELF::DT_RELR:
     case ELF::DT_JMPREL:
+    case ELF::DT_PREINIT_ARRAY:
+    case ELF::DT_VERDEF:
     case ELF::DT_VERNEED:
     case ELF::DT_VERSYM:
+    case ELF::DT_TLSDESC_GOT:
     case ELF::DT_HASH: {
       if (!opts::Rewrite)
         break;
-      const uint64_t OldAddr = Dyn.getPtr();
-      ErrorOr<BinarySection &> Sec = BC->getSectionForAddress(OldAddr);
-      if (Sec && Sec->getOutputAddress()) {
-        const uint64_t OldSecAddr = Sec->getAddress();
-        const uint64_t NewSecAddr = Sec->getOutputAddress();
-        NewDE.d_un.d_ptr = NewSecAddr + (OldAddr - OldSecAddr);
+      uint64_t NewAddr;
+      if (RetargetToOutputSection(Dyn.getPtr(), NewAddr))
+        NewDE.d_un.d_ptr = NewAddr;
+      break;
+    }
+    case ELF::DT_TLSDESC_PLT: {
+      // Address of the reserved TLSDESC PLT entry. The PLT is re-emitted in
+      // -rewrite mode and the entry may not keep its relative position in
+      // the output .plt, so prefer the function-address mapping and fall
+      // back to section-relative retargeting.
+      if (!opts::Rewrite)
+        break;
+      if (uint64_t NewAddress = getNewFunctionAddress(Dyn.getPtr())) {
+        NewDE.d_un.d_ptr = NewAddress;
+        break;
       }
+      uint64_t NewAddr;
+      if (RetargetToOutputSection(Dyn.getPtr(), NewAddr))
+        NewDE.d_un.d_ptr = NewAddr;
       break;
     }
     }
@@ -7724,6 +7804,12 @@ Error RewriteInstance::readELFDynamic(ELFObjectFile<ELFT> *File) {
       break;
     case ELF::DT_RELR:
       DynamicRelrAddress = Dyn.getPtr();
+      break;
+    case ELF::DT_TLSDESC_PLT:
+      TLSDescPLTAddress = Dyn.getPtr();
+      break;
+    case ELF::DT_TLSDESC_GOT:
+      TLSDescGOTAddress = Dyn.getPtr();
       break;
     case ELF::DT_RELRSZ:
       DynamicRelrSize = Dyn.getVal();

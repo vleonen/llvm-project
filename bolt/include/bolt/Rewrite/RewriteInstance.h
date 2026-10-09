@@ -585,6 +585,13 @@ private:
   std::optional<uint64_t> PLTRelocationsAddress;
   uint64_t PLTRelocationsSize{0};
 
+  /// Address of the reserved TLSDESC PLT entry (DT_TLSDESC_PLT) and of the
+  /// GOT slot it loads through (DT_TLSDESC_GOT), captured from .dynamic so
+  /// that the PLT parser can re-emit the entry in -rewrite mode and
+  /// patchELFDynamic can retarget the tags to the new addresses.
+  uint64_t TLSDescPLTAddress{0};
+  uint64_t TLSDescGOTAddress{0};
+
   /// Number of relocations read from DT_JMPREL.
   uint32_t NumJmpRelocations{0};
 

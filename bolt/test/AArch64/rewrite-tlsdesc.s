@@ -21,8 +21,11 @@
 # DYN: R_AARCH64_TLSDESC {{.*}} tls_var2
 
 ## The ADRP, LDR and ADD must all encode the same page (ADRP) and low-12
-## offset (LDR == ADD).
-# CODE: adrp x3, 0x[[PAGE:[0-9a-f]+]]
+## offset (LDR == ADD). Anchor to <get_var>: the re-emitted reserved TLSDESC
+## PLT entry in .plt (emitted since DT_TLSDESC_PLT is retargeted through it)
+## also contains an adrp x3 and must not match here.
+# CODE: <get_var>:
+# CODE-NEXT: adrp x3, 0x[[PAGE:[0-9a-f]+]]
 # CODE-NEXT: ldr x4, [x3, #0x[[OFF:[0-9a-f]+]]]
 # CODE-NEXT: add x3, x3, #0x[[OFF]]
 

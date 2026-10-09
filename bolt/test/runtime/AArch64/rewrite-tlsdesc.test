@@ -1,0 +1,59 @@
+# Verify that -rewrite handles the TLS descriptor dynamic tags
+# (DT_TLSDESC_PLT / DT_TLSDESC_GOT) emitted by GNU linkers for libraries
+# with TLS variables.
+#
+# bfd and gold point DT_TLSDESC_PLT at a reserved .plt entry (a
+# non-canonical stp/adrp/adrp/ldr/add/br sequence) and DT_TLSDESC_GOT at
+# the descriptor GOT slot. -rewrite used to drop the reserved entry from
+# the re-emitted .plt and leave both tags at stale input addresses. The
+# loader resolves TLS descriptors eagerly on glibc/AArch64, so the
+# staleness is silent at runtime here - the assertions below check the
+# values directly: the tags must be retargeted and the reserved entry
+# must be present in the output .plt with its GOT references rebound.
+
+# REQUIRES: system-linux
+# REQUIRES: gnu_ld
+
+# RUN: rm -rf %t && mkdir %t
+## lld does not emit the TLSDESC tags - link with bfd.
+# RUN: %clang %cflags -fuse-ld=bfd -shared -fPIC -Wl,-q \
+# RUN:   -o %t/libtlsdesc.so %S/Inputs/rewrite-tlsdesc-lib.c
+
+## Sanity: the input carries both tags.
+# RUN: llvm-readelf -d %t/libtlsdesc.so | FileCheck %s --check-prefix=CHECK-DT
+# CHECK-DT: (TLSDESC_PLT)
+# CHECK-DT: (TLSDESC_GOT)
+
+# RUN: %clang %cflags %S/Inputs/rewrite-tlsdesc-main.c -o %t/main \
+# RUN:   -L%t -l:libtlsdesc.so -Wl,-rpath,%t
+# RUN: %t/main | FileCheck %s --check-prefix=CHECK-ORIG
+# CHECK-ORIG: tlsdesc ok 42
+
+# RUN: cp %t/libtlsdesc.so %t/libtlsdesc.orig.so
+# RUN: llvm-bolt %t/libtlsdesc.so -o %t/libtlsdesc.so.new -rewrite
+# RUN: mv %t/libtlsdesc.so.new %t/libtlsdesc.so
+# RUN: %t/main | FileCheck %s
+
+## Both tags must no longer hold their input addresses.
+# RUN: llvm-readelf -d %t/libtlsdesc.orig.so | awk '/TLSDESC_PLT/{print $NF}' > %t.plt
+# RUN: llvm-readelf -d %t/libtlsdesc.so | awk '/TLSDESC_PLT/{print $NF}' >> %t.plt
+# RUN: FileCheck %s --check-prefix=CHECK-PLTVAL < %t.plt
+# CHECK-PLTVAL: [[IN:0x[0-9a-f]+]]
+# CHECK-PLTVAL-NOT: [[IN]]
+# CHECK-PLTVAL: {{0x[0-9a-f]+}}
+# RUN: llvm-readelf -d %t/libtlsdesc.orig.so | awk '/TLSDESC_GOT/{print $NF}' > %t.got
+# RUN: llvm-readelf -d %t/libtlsdesc.so | awk '/TLSDESC_GOT/{print $NF}' >> %t.got
+# RUN: FileCheck %s --check-prefix=CHECK-GOTVAL < %t.got
+# CHECK-GOTVAL: [[IN:0x[0-9a-f]+]]
+# CHECK-GOTVAL-NOT: [[IN]]
+# CHECK-GOTVAL: {{0x[0-9a-f]+}}
+
+## The reserved entry must be re-emitted into .plt (its signature x2/x3
+## prologue does not appear in any other entry) with references to the
+## relocated GOT slot.
+# RUN: llvm-objdump -d --section=.plt %t/libtlsdesc.so | FileCheck %s --check-prefix=CHECK-ENTRY
+# CHECK-ENTRY: stp x2, x3, [sp, #-0x10]!
+# CHECK-ENTRY: ldr x2, [x2, #{{0x[0-9a-f]+}}]
+# CHECK-ENTRY: add x3, x3, #{{0x[0-9a-f]+}}
+
+# CHECK: tlsdesc ok 42

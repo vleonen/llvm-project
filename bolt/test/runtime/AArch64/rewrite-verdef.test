@@ -1,0 +1,41 @@
+# Verify that -rewrite repoints DT_VERDEF when the input defines symbol
+# versions (.gnu.version_d). BOLT relocates the section to a new output
+# address but used to leave DT_VERDEF at the stale input address, which
+# after the rewrite landed in the middle of other sections (e.g.
+# .text.cold). The dynamic linker then parsed code bytes as Elf64_Verdef
+# records and the process died at startup ("unsupported version 0 of
+# Verdef record" or SIGSEGV).
+#
+# The library uses two chained versions so multiple Verdef nodes and their
+# aux chains are exercised. A version script makes every linker (lld
+# included, which lit forces) emit the version definition table.
+
+# REQUIRES: system-linux
+
+# RUN: rm -rf %t && mkdir %t
+# RUN: %clang %cflags -shared -fPIC -Wl,-q \
+# RUN:   -Wl,--version-script=%S/Inputs/rewrite-verdef.map \
+# RUN:   -o %t/libverdef.so %S/Inputs/rewrite-verdef-lib.c
+
+## Sanity: the version script yielded a version definition table.
+# RUN: llvm-readelf -d %t/libverdef.so | FileCheck %s --check-prefix=CHECK-DT
+# CHECK-DT: (VERDEF)
+# CHECK-DT: (VERDEFNUM) 3
+
+# RUN: %clang %cflags %S/Inputs/rewrite-verdef-main.c -o %t/main \
+# RUN:   -L%t -l:libverdef.so -Wl,-rpath,%t
+# RUN: %t/main | FileCheck %s --check-prefix=CHECK-ORIG
+# CHECK-ORIG: verdef ok
+
+# RUN: llvm-bolt %t/libverdef.so -o %t/libverdef.so.new -rewrite
+# RUN: mv %t/libverdef.so.new %t/libverdef.so
+# RUN: %t/main | FileCheck %s
+
+## DT_VERDEF must equal the new .gnu.version_d address.
+# RUN: llvm-readelf -d %t/libverdef.so > %t.a
+# RUN: llvm-readelf -SW %t/libverdef.so >> %t.a
+# RUN: FileCheck %s --check-prefix=CHECK-ADDR < %t.a
+# CHECK-ADDR: (VERDEF){{ +}}0x[[#%x,VD:]]
+# CHECK-ADDR: .gnu.version_d{{ +}}VERDEF{{ +}}{{0*}}[[#%x,VD]]{{ }}
+
+# CHECK: verdef ok

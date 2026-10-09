@@ -1,0 +1,28 @@
+# Verify that -rewrite repoints DT_PREINIT_ARRAY for executables with a
+# .preinit_array section. glibc runs preinit constructors before any
+# DT_INIT/DT_INIT_ARRAY constructor at startup; -rewrite used to leave
+# DT_PREINIT_ARRAY at the stale input address while moving the section,
+# so the loader called through a garbage pointer and crashed (exit 139).
+
+# REQUIRES: system-linux
+
+# RUN: %clang %cflags -Wl,-q %S/Inputs/rewrite-preinit.c -o %t.orig
+# RUN: %t.orig | FileCheck %s --check-prefix=CHECK-ORIG
+# CHECK-ORIG: preinit ran
+# CHECK-ORIG: main ran
+
+## Sanity: the input has a preinit array.
+# RUN: llvm-readelf -d %t.orig | FileCheck %s --check-prefix=CHECK-DT
+# CHECK-DT: (PREINIT_ARRAY)
+
+# RUN: llvm-bolt %t.orig -o %t.bolt -rewrite
+# RUN: %t.bolt | FileCheck %s
+# CHECK: preinit ran
+# CHECK: main ran
+
+## DT_PREINIT_ARRAY must equal the new .preinit_array address.
+# RUN: llvm-readelf -d %t.bolt > %t.a
+# RUN: llvm-readelf -SW %t.bolt >> %t.a
+# RUN: FileCheck %s --check-prefix=CHECK-ADDR < %t.a
+# CHECK-ADDR: (PREINIT_ARRAY){{ +}}0x[[#%x,PA:]]
+# CHECK-ADDR: .preinit_array{{ +}}PREINIT_ARRAY{{ +}}{{0*}}[[#%x,PA]]{{ }}
