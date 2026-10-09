@@ -226,6 +226,29 @@ report the number of functions with a stale profile. The higher the
 number, the less performance improvement should be expected. Thus, it is
 crucial to update `.fdata` for release branches.
 
+### Rewrite Mode (Experimental)
+
+With the `-rewrite` flag, BOLT rebuilds the binary from its internal
+representation instead of patching the original file in place. The whole
+output is laid out anew: code and data sections are placed together,
+references are updated to the new layout, and the resulting binary is
+self-consistent — its section names, symbol tables and dynamic metadata
+describe the rewritten file rather than the input. The lite mode is
+disabled in rewrite mode, so all functions are processed; PLT entries
+are regenerated with their GOT references, and unwind information is
+rebuilt for the relocated code.
+
+The mode requires a binary linked with relocations (see Step 0; pass
+`-Wl,-q`) and is currently supported on AArch64 and X86. It is not
+compatible with options that bypass disassembly or rewriting of
+functions, or that rely on patching the original binary layout:
+`-instrument`, `-use-old-text`, `-use-gnu-stack`,
+`--merge-text-sections` and `--relax-exp`. Because the main code
+section is fully regenerated, every function in it must be processed:
+BOLT rejects binaries whose functions are excluded (e.g. via `-funcs`,
+`-skip-funcs` or `-max-funcs`) or cannot be disassembled. Other code
+sections (e.g. `.init`, `.fini`) are carried over unchanged.
+
 ## Multiple Profiles
 
 Suppose your application can run in different modes, and you can generate
